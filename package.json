@@ -1,0 +1,29 @@
+{
+  "name": "@alphasystem/skopos",
+  "version": "0.1.0",
+  "description": "The official server-side NodeJS SDK for Alpha System Skopos Analytics",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "skopos",
+    "analytics",
+    "pocketbase",
+    "privacy",
+    "sdk",
+    "nodejs"
+  ],
+  "author": "Alpha System",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/devAlphaSystem/Alpha-System-Skopos-SDK.git"
+  },
+  "dependencies": {
+    "isbot": "^5.1.31",
+    "pocketbase": "^0.26.2",
+    "ua-parser-js": "^2.0.5"
+  }
+}
