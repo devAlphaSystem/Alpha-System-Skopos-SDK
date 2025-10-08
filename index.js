@@ -1,4 +1,5 @@
 const PocketBase = require("pocketbase/cjs");
+const geoip = require("geoip-lite");
 const { detectBot, parseUserAgent, extractRequestData, generateVisitorId } = require("./modules/utils");
 
 // Constants
@@ -209,6 +210,7 @@ class SkoposSDK {
             deviceBreakdown: [],
             browserBreakdown: [],
             languageBreakdown: [],
+            countryBreakdown: [],
             utmSourceBreakdown: [],
             utmMediumBreakdown: [],
             utmCampaignBreakdown: [],
@@ -267,6 +269,7 @@ class SkoposSDK {
       updateBreakdown(summaryData.deviceBreakdown, data.device);
       updateBreakdown(summaryData.browserBreakdown, data.browser);
       updateBreakdown(summaryData.languageBreakdown, data.language);
+      updateBreakdown(summaryData.countryBreakdown, data.country);
 
       let referrerHost = "Direct";
       if (data.referrer) {
@@ -309,6 +312,14 @@ class SkoposSDK {
 
     if (detectBot(userAgent)) {
       return;
+    }
+
+    let country = "Unknown";
+    if (ip) {
+      const geo = geoip.lookup(ip);
+      if (geo?.country) {
+        country = geo.country;
+      }
     }
 
     const visitorId = generateVisitorId(siteId, ip, userAgent);
@@ -358,6 +369,7 @@ class SkoposSDK {
         screenWidth,
         screenHeight,
         language,
+        country,
         utmSource: utm?.utm_source,
         utmMedium: utm?.utm_medium,
         utmCampaign: utm?.utm_campaign,
@@ -368,7 +380,7 @@ class SkoposSDK {
         sessionId = newSession.id;
         this.sessionCache.set(visitorId, { sessionId, lastActivity: now });
 
-        this._updateDashboardSummary({ ...data, ...uaDetails }, isNewSession);
+        this._updateDashboardSummary({ ...data, ...uaDetails, country }, isNewSession);
       } catch (e) {
         console.error("SkoposSDK: Error creating session.", e);
         return;
@@ -376,7 +388,7 @@ class SkoposSDK {
     }
 
     if (!isNewSession) {
-      this._updateDashboardSummary(data, isNewSession);
+      this._updateDashboardSummary({ ...data, country }, isNewSession);
     }
 
     // Prepare and queue the event payload
