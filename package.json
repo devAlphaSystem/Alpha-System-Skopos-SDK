@@ -1,6 +1,6 @@
 {
   "name": "@alphasystem/skopos",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "The official server-side NodeJS SDK for Alpha System Skopos Analytics",
   "main": "index.js",
   "types": "index.d.ts",
