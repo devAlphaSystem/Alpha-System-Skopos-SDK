@@ -2,15 +2,16 @@ const PocketBase = require("pocketbase/cjs");
 const geoip = require("geoip-lite");
 const { detectBot, parseUserAgent, extractRequestData, generateVisitorId } = require("./modules/utils");
 
-// Constants
 const VISITORS_COLLECTION = "visitors";
 const SESSIONS_COLLECTION = "sessions";
 const EVENTS_COLLECTION = "events";
 const SUMMARIES_COLLECTION = "dash_sum";
 
-const DEFAULT_BATCH_INTERVAL_MS = 10000; // 10 seconds
+const DEFAULT_BATCH_INTERVAL_MS = 10000;
 const DEFAULT_MAX_BATCH_SIZE = 100;
-const DEFAULT_SESSION_TIMEOUT_MS = 1000 * 60 * 30; // 30 minutes
+const DEFAULT_SESSION_TIMEOUT_MS = 1000 * 60 * 30;
+const SUMMARY_FLUSH_INTERVAL_MS = 5000;
+const SESSION_CACHE_CLEANUP_INTERVAL_MS = 1000 * 60 * 5;
 
 /**
  * The main Skopos SDK class for server-side event tracking.
@@ -33,16 +34,20 @@ class SkoposSDK {
     this.sessionTimeout = options.sessionTimeoutMs ?? DEFAULT_SESSION_TIMEOUT_MS;
     this.sessionCache = new Map();
     this.eventQueue = [];
-    this.timer = null;
+    this.summaryQueue = new Map();
+    this.eventTimer = null;
+    this.summaryTimer = null;
+    this.cacheTimer = null;
 
-    // Batching configuration
     this.batchingEnabled = options.batch ?? false;
     this.batchInterval = options.batchInterval ?? DEFAULT_BATCH_INTERVAL_MS;
     this.maxBatchSize = options.maxBatchSize ?? DEFAULT_MAX_BATCH_SIZE;
 
     if (this.batchingEnabled) {
-      this.timer = setInterval(() => this.flush(), this.batchInterval);
+      this.eventTimer = setInterval(() => this.flushEvents(), this.batchInterval);
     }
+    this.summaryTimer = setInterval(() => this._flushSummaries(), SUMMARY_FLUSH_INTERVAL_MS);
+    this.cacheTimer = setInterval(() => this._cleanSessionCache(), SESSION_CACHE_CLEANUP_INTERVAL_MS);
   }
 
   /**
@@ -154,19 +159,19 @@ class SkoposSDK {
    * await sdk.shutdown();
    */
   async shutdown() {
-    if (this.timer) {
-      clearInterval(this.timer);
-    }
-    await this.flush();
+    if (this.eventTimer) clearInterval(this.eventTimer);
+    if (this.summaryTimer) clearInterval(this.summaryTimer);
+    if (this.cacheTimer) clearInterval(this.cacheTimer);
+    this._cleanSessionCache();
+    await this.flushEvents();
+    await this._flushSummaries();
   }
 
   /**
-   * Immediately sends all queued events in batch.
+   * Immediately flushes any queued events to the PocketBase events collection.
    * @returns {Promise<void>}
-   * @example
-   * await sdk.flush();
    */
-  async flush() {
+  async flushEvents() {
     if (this.eventQueue.length === 0) {
       return;
     }
@@ -186,90 +191,53 @@ class SkoposSDK {
    * @param {boolean} isNewSession Whether this is a new session.
    * @returns {Promise<void>}
    */
-  async _updateDashboardSummary(data, isNewSession) {
-    const today = new Date();
-    const year = today.getUTCFullYear();
-    const month = String(today.getUTCMonth() + 1).padStart(2, "0");
-    const day = String(today.getUTCDate()).padStart(2, "0");
-    const todayDateString = `${year}-${month}-${day}`;
+  _updateDashboardSummary(data, eventDate) {
+    const dateForSummary = eventDate || new Date();
+    const year = dateForSummary.getUTCFullYear();
+    const month = String(dateForSummary.getUTCMonth() + 1).padStart(2, "0");
+    const day = String(dateForSummary.getUTCDate()).padStart(2, "0");
+    const summaryDateString = `${year}-${month}-${day}`;
 
-    const filter = `website="${this.websiteRecordId}" && date ~ "${todayDateString}%"`;
-
-    let summaryRecord;
-
-    try {
-      summaryRecord = await this.pb.collection(SUMMARIES_COLLECTION).getFirstListItem(filter);
-    } catch (error) {
-      if (error.status === 404) {
-        try {
-          const initialSummary = {
-            pageViews: 0,
-            visitors: 0,
-            topPages: [],
-            topReferrers: [],
-            deviceBreakdown: [],
-            browserBreakdown: [],
-            languageBreakdown: [],
-            countryBreakdown: [],
-            utmSourceBreakdown: [],
-            utmMediumBreakdown: [],
-            utmCampaignBreakdown: [],
-            topCustomEvents: [],
-          };
-          summaryRecord = await this.pb.collection(SUMMARIES_COLLECTION).create({
-            website: this.websiteRecordId,
-            date: `${todayDateString} 00:00:00.000Z`,
-            summary: initialSummary,
-            isFinalized: false,
-          });
-        } catch (creationError) {
-          if (creationError.status === 400 && creationError.response?.data) {
-            try {
-              await new Promise((resolve) => setTimeout(resolve, 100));
-              summaryRecord = await this.pb.collection(SUMMARIES_COLLECTION).getFirstListItem(filter);
-            } catch (refetchError) {
-              console.error("SkoposSDK: Failed to refetch summary record after race condition.", refetchError);
-              return;
-            }
-          } else {
-            console.error("SkoposSDK: Unexpected error creating summary record.", creationError);
-            return;
-          }
-        }
-      } else {
-        console.error("SkoposSDK: Error fetching summary record.", error);
-        return;
-      }
+    let summary = this.summaryQueue.get(summaryDateString);
+    if (!summary) {
+      summary = {
+        pageViews: 0,
+        visitors: 0,
+        newVisitors: 0,
+        returningVisitors: 0,
+        engagedSessions: 0,
+        topPages: new Map(),
+        entryPages: new Map(),
+        exitPages: new Map(),
+        topReferrers: new Map(),
+        deviceBreakdown: new Map(),
+        browserBreakdown: new Map(),
+        languageBreakdown: new Map(),
+        countryBreakdown: new Map(),
+        utmSourceBreakdown: new Map(),
+        utmMediumBreakdown: new Map(),
+        utmCampaignBreakdown: new Map(),
+        topCustomEvents: new Map(),
+      };
+      this.summaryQueue.set(summaryDateString, summary);
     }
 
-    if (!summaryRecord) {
-      console.error("SkoposSDK: Could not obtain a summary record to update.");
-      return;
-    }
-
-    const summaryData = summaryRecord.summary;
-
-    /**
-     * Updates an array (breakdown) with the given key (e.g., browser, language).
-     * @param {Array<{key: string, count: number}>} list
-     * @param {string} key
-     */
-    const updateBreakdown = (list, key) => {
+    const updateMap = (map, key) => {
       if (!key) return;
-      const item = list.find((it) => it.key === key);
-      if (item) {
-        item.count += 1;
-      } else {
-        list.push({ key, count: 1 });
-      }
+      map.set(key, (map.get(key) || 0) + 1);
     };
 
-    if (isNewSession) {
-      summaryData.visitors = (summaryData.visitors || 0) + 1;
-      updateBreakdown(summaryData.deviceBreakdown, data.device);
-      updateBreakdown(summaryData.browserBreakdown, data.browser);
-      updateBreakdown(summaryData.languageBreakdown, data.language);
-      updateBreakdown(summaryData.countryBreakdown, data.country);
+    if (data.isNewSession) {
+      summary.visitors++;
+      if (data.isNewVisitor) {
+        summary.newVisitors++;
+      } else {
+        summary.returningVisitors++;
+      }
+      updateMap(summary.deviceBreakdown, data.device);
+      updateMap(summary.browserBreakdown, data.browser);
+      updateMap(summary.languageBreakdown, data.language);
+      updateMap(summary.countryBreakdown, data.country);
 
       let referrerHost = "Direct";
       if (data.referrer) {
@@ -279,24 +247,149 @@ class SkoposSDK {
           referrerHost = data.referrer;
         }
       }
-      updateBreakdown(summaryData.topReferrers, referrerHost);
+      updateMap(summary.topReferrers, referrerHost);
+      updateMap(summary.entryPages, data.path);
 
-      updateBreakdown(summaryData.utmSourceBreakdown, data.utm?.utm_source);
-      updateBreakdown(summaryData.utmMediumBreakdown, data.utm?.utm_medium);
-      updateBreakdown(summaryData.utmCampaignBreakdown, data.utm?.utm_campaign);
+      updateMap(summary.utmSourceBreakdown, data.utm?.utm_source);
+      updateMap(summary.utmMediumBreakdown, data.utm?.utm_medium);
+      updateMap(summary.utmCampaignBreakdown, data.utm?.utm_campaign);
+    }
+
+    if (data.isEngaged) {
+      summary.engagedSessions++;
+    }
+
+    if (data.expiredSessionPath) {
+      updateMap(summary.exitPages, data.expiredSessionPath);
     }
 
     if (data.type === "pageView") {
-      summaryData.pageViews = (summaryData.pageViews || 0) + 1;
-      updateBreakdown(summaryData.topPages, data.path);
+      summary.pageViews++;
+      updateMap(summary.topPages, data.path);
     } else if (data.type === "custom" && data.name) {
-      updateBreakdown(summaryData.topCustomEvents, data.name);
+      updateMap(summary.topCustomEvents, data.name);
+    }
+  }
+
+  /**
+   * Flushes the in-memory summary queue to the PocketBase summaries collection.
+   * Merges with existing records or creates new ones as needed.
+   * @private
+   * @returns {Promise<void>}
+   */
+  async _flushSummaries() {
+    if (this.summaryQueue.size === 0) {
+      return;
     }
 
-    try {
-      await this.pb.collection(SUMMARIES_COLLECTION).update(summaryRecord.id, { summary: summaryData });
-    } catch (updateError) {
-      console.error("SkoposSDK: Failed to update dashboard summary.", updateError);
+    const summariesToFlush = new Map(this.summaryQueue);
+    this.summaryQueue.clear();
+
+    for (const [dateString, summaryData] of summariesToFlush.entries()) {
+      const filter = `website="${this.websiteRecordId}" && date ~ "${dateString}%"`;
+      let summaryRecord;
+
+      try {
+        summaryRecord = await this.pb.collection(SUMMARIES_COLLECTION).getFirstListItem(filter);
+      } catch (error) {
+        if (error.status === 404) {
+          try {
+            const initialSummary = {
+              pageViews: 0,
+              visitors: 0,
+              newVisitors: 0,
+              returningVisitors: 0,
+              engagedSessions: 0,
+              topPages: [],
+              entryPages: [],
+              exitPages: [],
+              topReferrers: [],
+              deviceBreakdown: [],
+              browserBreakdown: [],
+              languageBreakdown: [],
+              countryBreakdown: [],
+              utmSourceBreakdown: [],
+              utmMediumBreakdown: [],
+              utmCampaignBreakdown: [],
+              topCustomEvents: [],
+            };
+            summaryRecord = await this.pb.collection(SUMMARIES_COLLECTION).create({
+              website: this.websiteRecordId,
+              date: `${dateString} 00:00:00.000Z`,
+              summary: initialSummary,
+              isFinalized: false,
+            });
+          } catch (creationError) {
+            if (creationError.status === 400) {
+              await new Promise((resolve) => setTimeout(resolve, 100));
+              summaryRecord = await this.pb.collection(SUMMARIES_COLLECTION).getFirstListItem(filter);
+            } else {
+              console.error("SkoposSDK: Error creating summary record.", creationError);
+              continue;
+            }
+          }
+        } else {
+          console.error("SkoposSDK: Error fetching summary record.", error);
+          continue;
+        }
+      }
+
+      /**
+       * Updates an array (breakdown) with the given key (e.g., browser, language).
+       * @param {Array<{key: string, count: number}>} list
+       * @param {string} key
+       */
+      const updateBreakdown = (list, map) => {
+        for (const [key, count] of map.entries()) {
+          const item = list.find((it) => it.key === key);
+          if (item) {
+            item.count += count;
+          } else {
+            list.push({ key, count });
+          }
+        }
+      };
+
+      const currentSummary = summaryRecord.summary;
+      currentSummary.pageViews += summaryData.pageViews;
+      currentSummary.visitors += summaryData.visitors;
+      currentSummary.newVisitors += summaryData.newVisitors;
+      currentSummary.returningVisitors += summaryData.returningVisitors;
+      currentSummary.engagedSessions += summaryData.engagedSessions;
+
+      updateBreakdown(currentSummary.topPages, summaryData.topPages);
+      updateBreakdown(currentSummary.entryPages, summaryData.entryPages);
+      updateBreakdown(currentSummary.exitPages, summaryData.exitPages);
+      updateBreakdown(currentSummary.topReferrers, summaryData.topReferrers);
+      updateBreakdown(currentSummary.deviceBreakdown, summaryData.deviceBreakdown);
+      updateBreakdown(currentSummary.browserBreakdown, summaryData.browserBreakdown);
+      updateBreakdown(currentSummary.languageBreakdown, summaryData.languageBreakdown);
+      updateBreakdown(currentSummary.countryBreakdown, summaryData.countryBreakdown);
+      updateBreakdown(currentSummary.utmSourceBreakdown, summaryData.utmSourceBreakdown);
+      updateBreakdown(currentSummary.utmMediumBreakdown, summaryData.utmMediumBreakdown);
+      updateBreakdown(currentSummary.utmCampaignBreakdown, summaryData.utmCampaignBreakdown);
+      updateBreakdown(currentSummary.topCustomEvents, summaryData.topCustomEvents);
+
+      try {
+        await this.pb.collection(SUMMARIES_COLLECTION).update(summaryRecord.id, { summary: currentSummary });
+      } catch (updateError) {
+        console.error("SkoposSDK: Failed to flush dashboard summary.", updateError);
+      }
+    }
+  }
+
+  /**
+   * Cleans up expired sessions from the session cache.
+   * @private
+   */
+  _cleanSessionCache() {
+    const now = Date.now();
+    for (const [visitorId, sessionData] of this.sessionCache.entries()) {
+      if (now - sessionData.lastActivity > this.sessionTimeout) {
+        const lastActivityDate = new Date(sessionData.lastActivity);
+        this._updateDashboardSummary({ expiredSessionPath: sessionData.lastPath }, lastActivityDate);
+        this.sessionCache.delete(visitorId);
+      }
     }
   }
 
@@ -327,11 +420,20 @@ class SkoposSDK {
     let sessionId;
     const cachedSession = this.sessionCache.get(visitorId);
     let isNewSession = false;
+    let isNewVisitor = false;
+    let isEngaged = false;
 
-    // Check for an active session in the cache
     if (cachedSession && now - cachedSession.lastActivity < this.sessionTimeout) {
       cachedSession.lastActivity = now;
+      cachedSession.lastPath = path;
       sessionId = cachedSession.sessionId;
+      cachedSession.eventCount++;
+
+      if (!cachedSession.isEngaged && (cachedSession.eventCount >= 2 || (customData?.duration && customData.duration > 10))) {
+        cachedSession.isEngaged = true;
+        isEngaged = true;
+      }
+
       this.pb
         .collection(SESSIONS_COLLECTION)
         .update(sessionId, {})
@@ -339,18 +441,23 @@ class SkoposSDK {
           if (err.status === 404) {
             this.sessionCache.delete(visitorId);
           }
-          console.error(`SkoposSDK: Failed to update session TTL for ${sessionId}.`, err.message);
+          console.error(`SkoposSDK: Failed to update session for ${sessionId}.`, err.message);
         });
     } else {
-      // No active session, create a new one
       isNewSession = true;
+      if (cachedSession) {
+        const lastActivityDate = new Date(cachedSession.lastActivity);
+        this._updateDashboardSummary({ expiredSessionPath: cachedSession.lastPath }, lastActivityDate);
+      }
+
       let visitor;
       try {
         visitor = await this.pb.collection(VISITORS_COLLECTION).getFirstListItem(`visitorId="${visitorId}"`);
+        isNewVisitor = false;
       } catch (e) {
         if (e.status === 404) {
-          // Create visitor if it doesn't exist
           visitor = await this.pb.collection(VISITORS_COLLECTION).create({ website: this.websiteRecordId, visitorId });
+          isNewVisitor = true;
         } else {
           console.error("SkoposSDK: Error finding or creating visitor.", e);
           return;
@@ -365,6 +472,7 @@ class SkoposSDK {
         os: uaDetails.os,
         device: uaDetails.device,
         entryPath: path,
+        exitPath: path,
         referrer,
         screenWidth,
         screenHeight,
@@ -373,14 +481,22 @@ class SkoposSDK {
         utmSource: utm?.utm_source,
         utmMedium: utm?.utm_medium,
         utmCampaign: utm?.utm_campaign,
+        isNewVisitor,
       };
 
       try {
         const newSession = await this.pb.collection(SESSIONS_COLLECTION).create(sessionData);
         sessionId = newSession.id;
-        this.sessionCache.set(visitorId, { sessionId, lastActivity: now });
 
-        this._updateDashboardSummary({ ...data, ...uaDetails, country }, isNewSession);
+        let sessionIsEngaged = false;
+        if (customData?.duration && customData.duration > 10) {
+          isEngaged = true;
+          sessionIsEngaged = true;
+        }
+
+        this.sessionCache.set(visitorId, { sessionId, lastActivity: now, eventCount: 1, lastPath: path, isEngaged: sessionIsEngaged });
+
+        this._updateDashboardSummary({ ...data, ...uaDetails, country, isNewSession, isNewVisitor, isEngaged });
       } catch (e) {
         console.error("SkoposSDK: Error creating session.", e);
         return;
@@ -388,10 +504,9 @@ class SkoposSDK {
     }
 
     if (!isNewSession) {
-      this._updateDashboardSummary({ ...data, country }, isNewSession);
+      this._updateDashboardSummary({ ...data, country, isNewSession, isNewVisitor, isEngaged });
     }
 
-    // Prepare and queue the event payload
     const eventPayload = {
       session: sessionId,
       type: type,
@@ -407,7 +522,7 @@ class SkoposSDK {
     if (this.batchingEnabled) {
       this.eventQueue.push(eventPayload);
       if (this.eventQueue.length >= this.maxBatchSize) {
-        this.flush();
+        this.flushEvents();
       }
     } else {
       this._sendEvent(eventPayload);
