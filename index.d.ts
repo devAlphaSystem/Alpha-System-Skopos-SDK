@@ -49,6 +49,12 @@ export interface SkoposSDKOptions {
    * @default 1800000 (30 minutes)
    */
   sessionTimeoutMs?: number;
+
+  /**
+   * The interval in milliseconds at which to send batched JavaScript error reports.
+   * @default 300000 (5 minutes)
+   */
+  jsErrorBatchInterval?: number;
 }
 
 /**
@@ -57,9 +63,9 @@ export interface SkoposSDKOptions {
  */
 export interface ApiEventPayload {
   /**
-   * The type of event. 'pageView' is standard, 'custom' is for user-defined events.
+   * The type of event. 'pageView', 'custom', or 'jsError'.
    */
-  type: "pageView" | "custom";
+  type: "pageView" | "custom" | "jsError";
 
   /**
    * The name of the event. Required for 'custom' events.
@@ -122,6 +128,16 @@ export interface ApiEventPayload {
    * An object for any custom data you want to associate with the event.
    */
   customData?: Record<string, any>;
+
+  /**
+   * The error message, for 'jsError' events.
+   */
+  errorMessage?: string;
+
+  /**
+   * The error stack trace, for 'jsError' events.
+   */
+  stackTrace?: string;
 }
 
 /**

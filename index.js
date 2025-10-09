@@ -1,15 +1,18 @@
 const PocketBase = require("pocketbase/cjs");
 const geoip = require("geoip-lite");
+const { createHash } = require("node:crypto");
 const { detectBot, parseUserAgent, extractRequestData, generateVisitorId } = require("./modules/utils");
 
 const VISITORS_COLLECTION = "visitors";
 const SESSIONS_COLLECTION = "sessions";
 const EVENTS_COLLECTION = "events";
 const SUMMARIES_COLLECTION = "dash_sum";
+const ERRORS_COLLECTION = "js_errors";
 
 const DEFAULT_BATCH_INTERVAL_MS = 10000;
 const DEFAULT_MAX_BATCH_SIZE = 100;
 const DEFAULT_SESSION_TIMEOUT_MS = 1000 * 60 * 30;
+const DEFAULT_ERROR_BATCH_INTERVAL_MS = 1000 * 60 * 5;
 const SUMMARY_FLUSH_INTERVAL_MS = 5000;
 const SESSION_CACHE_CLEANUP_INTERVAL_MS = 1000 * 60 * 5;
 
@@ -35,19 +38,24 @@ class SkoposSDK {
     this.sessionCache = new Map();
     this.eventQueue = [];
     this.summaryQueue = new Map();
+    this.jsErrorQueue = new Map();
     this.eventTimer = null;
     this.summaryTimer = null;
     this.cacheTimer = null;
+    this.jsErrorTimer = null;
 
     this.batchingEnabled = options.batch ?? false;
     this.batchInterval = options.batchInterval ?? DEFAULT_BATCH_INTERVAL_MS;
     this.maxBatchSize = options.maxBatchSize ?? DEFAULT_MAX_BATCH_SIZE;
+
+    const jsErrorBatchInterval = options.jsErrorBatchInterval ?? DEFAULT_ERROR_BATCH_INTERVAL_MS;
 
     if (this.batchingEnabled) {
       this.eventTimer = setInterval(() => this.flushEvents(), this.batchInterval);
     }
     this.summaryTimer = setInterval(() => this._flushSummaries(), SUMMARY_FLUSH_INTERVAL_MS);
     this.cacheTimer = setInterval(() => this._cleanSessionCache(), SESSION_CACHE_CLEANUP_INTERVAL_MS);
+    this.jsErrorTimer = setInterval(() => this._flushJsErrors(), jsErrorBatchInterval);
   }
 
   /**
@@ -102,11 +110,20 @@ class SkoposSDK {
     const ip = (req.headers["x-forwarded-for"] || req.socket.remoteAddress)?.split(",")[0].trim();
     const userAgent = req.headers["user-agent"];
 
+    let path = "";
+    if (typeof payload.url === "string" && payload.url) {
+      try {
+        path = new URL(payload.url).pathname;
+      } catch {
+        path = payload.url;
+      }
+    }
+
     this._processAndQueueEvent({
       siteId: this.siteId,
       ip,
       userAgent,
-      path: new URL(payload.url).pathname,
+      path,
       type: payload.type,
       name: payload.name,
       referrer: payload.referrer,
@@ -119,6 +136,8 @@ class SkoposSDK {
         utm_campaign: payload.utm_campaign,
       },
       customData: payload.customData,
+      errorMessage: payload.errorMessage,
+      stackTrace: payload.stackTrace,
     });
   }
 
@@ -162,8 +181,10 @@ class SkoposSDK {
     if (this.eventTimer) clearInterval(this.eventTimer);
     if (this.summaryTimer) clearInterval(this.summaryTimer);
     if (this.cacheTimer) clearInterval(this.cacheTimer);
+    if (this.jsErrorTimer) clearInterval(this.jsErrorTimer);
     this._cleanSessionCache();
     await this.flushEvents();
+    await this._flushJsErrors();
     await this._flushSummaries();
   }
 
@@ -206,6 +227,7 @@ class SkoposSDK {
         newVisitors: 0,
         returningVisitors: 0,
         engagedSessions: 0,
+        jsErrors: 0,
         topPages: new Map(),
         entryPages: new Map(),
         exitPages: new Map(),
@@ -218,6 +240,7 @@ class SkoposSDK {
         utmMediumBreakdown: new Map(),
         utmCampaignBreakdown: new Map(),
         topCustomEvents: new Map(),
+        topJsErrors: new Map(),
       };
       this.summaryQueue.set(summaryDateString, summary);
     }
@@ -268,6 +291,9 @@ class SkoposSDK {
       updateMap(summary.topPages, data.path);
     } else if (data.type === "custom" && data.name) {
       updateMap(summary.topCustomEvents, data.name);
+    } else if (data.type === "jsError" && data.errorMessage) {
+      summary.jsErrors++;
+      updateMap(summary.topJsErrors, data.errorMessage);
     }
   }
 
@@ -300,6 +326,7 @@ class SkoposSDK {
               newVisitors: 0,
               returningVisitors: 0,
               engagedSessions: 0,
+              jsErrors: 0,
               topPages: [],
               entryPages: [],
               exitPages: [],
@@ -312,6 +339,7 @@ class SkoposSDK {
               utmMediumBreakdown: [],
               utmCampaignBreakdown: [],
               topCustomEvents: [],
+              topJsErrors: [],
             };
             summaryRecord = await this.pb.collection(SUMMARIES_COLLECTION).create({
               website: this.websiteRecordId,
@@ -356,6 +384,7 @@ class SkoposSDK {
       currentSummary.newVisitors += summaryData.newVisitors;
       currentSummary.returningVisitors += summaryData.returningVisitors;
       currentSummary.engagedSessions += summaryData.engagedSessions;
+      currentSummary.jsErrors += summaryData.jsErrors;
 
       updateBreakdown(currentSummary.topPages, summaryData.topPages);
       updateBreakdown(currentSummary.entryPages, summaryData.entryPages);
@@ -369,11 +398,56 @@ class SkoposSDK {
       updateBreakdown(currentSummary.utmMediumBreakdown, summaryData.utmMediumBreakdown);
       updateBreakdown(currentSummary.utmCampaignBreakdown, summaryData.utmCampaignBreakdown);
       updateBreakdown(currentSummary.topCustomEvents, summaryData.topCustomEvents);
+      updateBreakdown(currentSummary.topJsErrors, summaryData.topJsErrors);
 
       try {
         await this.pb.collection(SUMMARIES_COLLECTION).update(summaryRecord.id, { summary: currentSummary });
       } catch (updateError) {
         console.error("SkoposSDK: Failed to flush dashboard summary.", updateError);
+      }
+    }
+  }
+
+  /**
+   * Flushes the in-memory JS error queue to the PocketBase js_errors collection.
+   * Merges with existing records or creates new ones as needed.
+   * @private
+   * @returns {Promise<void>}
+   */
+  async _flushJsErrors() {
+    if (this.jsErrorQueue.size === 0) {
+      return;
+    }
+
+    const errorsToFlush = new Map(this.jsErrorQueue);
+    this.jsErrorQueue.clear();
+
+    for (const [hash, errorData] of errorsToFlush.entries()) {
+      try {
+        const existingError = await this.pb.collection(ERRORS_COLLECTION).getFirstListItem(`errorHash="${hash}"`);
+        await this.pb.collection(ERRORS_COLLECTION).update(existingError.id, {
+          "count+": errorData.count,
+          lastSeen: new Date().toISOString(),
+        });
+      } catch (error) {
+        if (error.status === 404) {
+          try {
+            await this.pb.collection(ERRORS_COLLECTION).create({
+              website: this.websiteRecordId,
+              session: errorData.sessionId,
+              errorHash: hash,
+              errorMessage: errorData.errorMessage,
+              stackTrace: errorData.stackTrace,
+              url: errorData.url,
+              count: errorData.count,
+              lastSeen: new Date().toISOString(),
+            });
+          } catch (createError) {
+            console.error("SkoposSDK: Failed to create new JS error record.", createError);
+          }
+        } else {
+          console.error("SkoposSDK: Failed to find or update JS error record.", error);
+        }
       }
     }
   }
@@ -401,7 +475,7 @@ class SkoposSDK {
    * @returns {Promise<void>}
    */
   async _processAndQueueEvent(data) {
-    const { siteId, ip, userAgent, path, type, name, referrer, screenWidth, screenHeight, language, utm, customData } = data;
+    const { siteId, ip, userAgent, path, type, name, referrer, screenWidth, screenHeight, language, utm, customData, errorMessage, stackTrace } = data;
 
     if (detectBot(userAgent)) {
       return;
@@ -505,6 +579,33 @@ class SkoposSDK {
 
     if (!isNewSession) {
       this._updateDashboardSummary({ ...data, country, isNewSession, isNewVisitor, isEngaged });
+    }
+
+    if (type === "jsError") {
+      let safeUrl = "";
+      if (typeof data.url === "string" && data.url) {
+        try {
+          safeUrl = new URL(data.url).href;
+        } catch {
+          safeUrl = data.url;
+        }
+      }
+      const errorIdentifier = `${errorMessage}\n${(stackTrace || "").split("\n")[1]}`;
+      const errorHash = createHash("sha256").update(errorIdentifier).digest("hex");
+      const existingError = this.jsErrorQueue.get(errorHash);
+
+      if (existingError) {
+        existingError.count++;
+      } else {
+        this.jsErrorQueue.set(errorHash, {
+          sessionId,
+          errorMessage,
+          stackTrace,
+          url: safeUrl,
+          count: 1,
+        });
+      }
+      return;
     }
 
     const eventPayload = {
