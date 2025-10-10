@@ -55,6 +55,12 @@ export interface SkoposSDKOptions {
    * @default 300000 (5 minutes)
    */
   jsErrorBatchInterval?: number;
+
+  /**
+   * The interval in milliseconds at which to automatically refresh website settings (like IP blacklist).
+   * @default 900000 (15 minutes)
+   */
+  configRefreshIntervalMs?: number;
 }
 
 /**
