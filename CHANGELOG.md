@@ -1,3 +1,11 @@
+# 0.7.0
+
+#### Removed
+
+- Removed all UTM parameter tracking and processing features from the SDK, including fields in the API event payload, internal data structures, and summary generation.
+
+---
+
 # 0.6.0
 
 #### Added

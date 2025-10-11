@@ -11,7 +11,7 @@ This SDK works in tandem with the `skopos.js` client-side script and the Skopos 
 
 Skopos uses a hybrid tracking model with a clear purpose for each component:
 
-1.  **Client-Side Tracking (For All User Activity)**: The lightweight `skopos.js` script is the definitive tool for capturing rich, contextual user activity. It runs in the browser, captures screen size, UTMs, referrers, and more, sending this data to a dedicated API endpoint on your server. **All page views and user interactions should be tracked this way.**
+1.  **Client-Side Tracking (For All User Activity)**: The lightweight `skopos.js` script is the definitive tool for capturing rich, contextual user activity. It runs in the browser, captures screen size, referrers, and more, sending this data to a dedicated API endpoint on your server. **All page views and user interactions should be tracked this way.**
 
 2.  **Server-Side Tracking (For Backend-Only Events)**: This SDK is responsible for securely processing data from the client script via your API endpoint. It also provides a method to track events that happen exclusively on your backend, such as API calls, webhooks, or scheduled tasks.
 

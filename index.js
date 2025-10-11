@@ -137,11 +137,6 @@ class SkoposSDK {
       screenWidth: payload.screenWidth,
       screenHeight: payload.screenHeight,
       language: payload.language,
-      utm: {
-        utm_source: payload.utm_source,
-        utm_medium: payload.utm_medium,
-        utm_campaign: payload.utm_campaign,
-      },
       customData: payload.customData,
       errorMessage: payload.errorMessage,
       stackTrace: payload.stackTrace,
@@ -244,9 +239,6 @@ class SkoposSDK {
         browserBreakdown: new Map(),
         languageBreakdown: new Map(),
         countryBreakdown: new Map(),
-        utmSourceBreakdown: new Map(),
-        utmMediumBreakdown: new Map(),
-        utmCampaignBreakdown: new Map(),
         topCustomEvents: new Map(),
         topJsErrors: new Map(),
       };
@@ -280,10 +272,6 @@ class SkoposSDK {
       }
       updateMap(summary.topReferrers, referrerHost);
       updateMap(summary.entryPages, data.path);
-
-      updateMap(summary.utmSourceBreakdown, data.utm?.utm_source);
-      updateMap(summary.utmMediumBreakdown, data.utm?.utm_medium);
-      updateMap(summary.utmCampaignBreakdown, data.utm?.utm_campaign);
     }
 
     if (data.isEngaged) {
@@ -343,9 +331,6 @@ class SkoposSDK {
               browserBreakdown: [],
               languageBreakdown: [],
               countryBreakdown: [],
-              utmSourceBreakdown: [],
-              utmMediumBreakdown: [],
-              utmCampaignBreakdown: [],
               topCustomEvents: [],
               topJsErrors: [],
             };
@@ -402,9 +387,6 @@ class SkoposSDK {
       updateBreakdown(currentSummary.browserBreakdown, summaryData.browserBreakdown);
       updateBreakdown(currentSummary.languageBreakdown, summaryData.languageBreakdown);
       updateBreakdown(currentSummary.countryBreakdown, summaryData.countryBreakdown);
-      updateBreakdown(currentSummary.utmSourceBreakdown, summaryData.utmSourceBreakdown);
-      updateBreakdown(currentSummary.utmMediumBreakdown, summaryData.utmMediumBreakdown);
-      updateBreakdown(currentSummary.utmCampaignBreakdown, summaryData.utmCampaignBreakdown);
       updateBreakdown(currentSummary.topCustomEvents, summaryData.topCustomEvents);
       updateBreakdown(currentSummary.topJsErrors, summaryData.topJsErrors);
 
@@ -483,7 +465,7 @@ class SkoposSDK {
    * @returns {Promise<void>}
    */
   async _processAndQueueEvent(data) {
-    const { siteId, ip, userAgent, path, type, name, referrer, screenWidth, screenHeight, language, utm, customData, errorMessage, stackTrace } = data;
+    const { siteId, ip, userAgent, path, type, name, referrer, screenWidth, screenHeight, language, customData, errorMessage, stackTrace } = data;
 
     if (this.ipBlacklist.includes(ip)) {
       return;
@@ -578,9 +560,6 @@ class SkoposSDK {
         screenHeight,
         language,
         country,
-        utmSource: utm?.utm_source,
-        utmMedium: utm?.utm_medium,
-        utmCampaign: utm?.utm_campaign,
         isNewVisitor,
       };
 

@@ -106,31 +106,6 @@ export interface ApiEventPayload {
   language?: string;
 
   /**
-   * The UTM source parameter from the URL.
-   */
-  utm_source?: string;
-
-  /**
-   * The UTM medium parameter from the URL.
-   */
-  utm_medium?: string;
-
-  /**
-   * The UTM campaign parameter from the URL.
-   */
-  utm_campaign?: string;
-
-  /**
-   * The UTM term parameter from the URL.
-   */
-  utm_term?: string;
-
-  /**
-   * The UTM content parameter from the URL.
-   */
-  utm_content?: string;
-
-  /**
    * An object for any custom data you want to associate with the event.
    */
   customData?: Record<string, any>;
