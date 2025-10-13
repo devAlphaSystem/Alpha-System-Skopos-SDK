@@ -5,7 +5,7 @@ const PocketBase = require("pocketbase/cjs");
 const geoip = require("geoip-lite");
 const ipaddr = require("ipaddr.js");
 const { createHash } = require("node:crypto");
-const { detectBot, parseUserAgent, extractRequestData, generateVisitorId } = require("./modules/utils");
+const { detectBot, parseUserAgent, extractRequestData, generateVisitorId, validateAndSanitizeApiPayload, getSanitizedDomain } = require("./modules/utils");
 
 const VISITORS_COLLECTION = "visitors";
 const SESSIONS_COLLECTION = "sessions";
@@ -38,6 +38,7 @@ class SkoposSDK {
     this.pb = new PocketBase(options.pocketbaseUrl);
     this.siteId = options.siteId;
     this.websiteRecordId = null;
+    this.domain = null;
     this.disableLocalhostTracking = false;
     this.isArchived = false;
     this.ipBlacklist = [];
@@ -93,6 +94,7 @@ class SkoposSDK {
     try {
       const websiteRecord = await sdk.pb.collection("websites").getFirstListItem(`trackingId="${options.siteId}"`);
       sdk.websiteRecordId = websiteRecord.id;
+      sdk.domain = getSanitizedDomain(websiteRecord.domain);
       sdk.disableLocalhostTracking = websiteRecord.disableLocalhostTracking;
       sdk.isArchived = websiteRecord.isArchived || false;
       sdk.ipBlacklist = websiteRecord.ipBlacklist || [];
@@ -107,6 +109,7 @@ class SkoposSDK {
     try {
       await sdk.pb.collection("websites").subscribe(sdk.websiteRecordId, (e) => {
         if (e.action === "update") {
+          sdk.domain = getSanitizedDomain(e.record.domain);
           sdk.disableLocalhostTracking = e.record.disableLocalhostTracking;
           sdk.ipBlacklist = e.record.ipBlacklist || [];
           sdk.isArchived = e.record.isArchived || false;
@@ -127,15 +130,34 @@ class SkoposSDK {
    * @returns {Promise<void>|void}
    */
   trackApiEvent(req, payload) {
+    const sanitizedPayload = validateAndSanitizeApiPayload(payload);
+
+    if (!sanitizedPayload) {
+      return;
+    }
+
+    if (this.domain) {
+      try {
+        const payloadHostname = new URL(sanitizedPayload.url).hostname;
+        const siteDomain = this.domain.replace(/^www\./, "");
+
+        if (payloadHostname !== siteDomain && !payloadHostname.endsWith(`.${siteDomain}`)) {
+          return;
+        }
+      } catch (e) {
+        return;
+      }
+    }
+
     const ip = (req.headers["x-forwarded-for"] || req.socket.remoteAddress)?.split(",")[0].trim();
     const userAgent = req.headers["user-agent"];
 
     let path = "";
-    if (typeof payload.url === "string" && payload.url) {
+    if (typeof sanitizedPayload.url === "string" && sanitizedPayload.url) {
       try {
-        path = new URL(payload.url).pathname;
+        path = new URL(sanitizedPayload.url).pathname;
       } catch {
-        path = payload.url;
+        path = sanitizedPayload.url;
       }
     }
 
@@ -145,15 +167,15 @@ class SkoposSDK {
       userAgent,
       headers: req.headers,
       path,
-      type: payload.type,
-      name: payload.name,
-      referrer: payload.referrer,
-      screenWidth: payload.screenWidth,
-      screenHeight: payload.screenHeight,
-      language: payload.language,
-      customData: payload.customData,
-      errorMessage: payload.errorMessage,
-      stackTrace: payload.stackTrace,
+      type: sanitizedPayload.type,
+      name: sanitizedPayload.name,
+      referrer: sanitizedPayload.referrer,
+      screenWidth: sanitizedPayload.screenWidth,
+      screenHeight: sanitizedPayload.screenHeight,
+      language: sanitizedPayload.language,
+      customData: sanitizedPayload.customData,
+      errorMessage: sanitizedPayload.errorMessage,
+      stackTrace: sanitizedPayload.stackTrace,
     });
   }
 

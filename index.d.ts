@@ -136,6 +136,7 @@ declare class SkoposSDK {
   /**
    * Tracks an event using the rich data payload from the client-side script.
    * This is the primary method for tracking user activity like page views and interactions.
+   * The payload will be validated and sanitized; invalid or untrusted data will be rejected at runtime.
    * @param {IncomingMessage} req - The incoming HTTP request object from your server.
    * @param {ApiEventPayload} payload - The event data, typically from `req.body`.
    */

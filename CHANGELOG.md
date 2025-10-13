@@ -1,3 +1,18 @@
+# 0.11.0
+
+#### Added
+
+- Introduced new utility functions: `validateAndSanitizeApiPayload` for event data processing and `getSanitizedDomain` for domain extraction.
+- Added dynamic domain tracking functionality based on the website's configuration.
+
+#### Changed
+
+- Enhanced the `trackApiEvent` method to include comprehensive validation, sanitization, and clamping of incoming API event payloads. This ensures data integrity and rejects invalid or untrusted data at runtime.
+- Implemented domain-specific tracking for `trackApiEvent`, preventing events from being processed if their URL hostname does not match the configured website domain or its subdomains.
+- The SDK now dynamically retrieves and updates the website's domain configuration.
+
+---
+
 # 0.10.0
 
 #### Added

@@ -125,9 +125,131 @@ function generateVisitorId(siteId, ip, userAgent) {
   return createHash("sha256").update(data).digest("hex");
 }
 
+/**
+ * Validates, sanitizes, and clamps an incoming API event payload.
+ * @param {import('../index').ApiEventPayload} payload The raw event payload from the client.
+ * @returns {import('../index').ApiEventPayload | null} The sanitized payload or null if validation fails.
+ */
+function validateAndSanitizeApiPayload(payload) {
+  if (!payload || typeof payload !== "object") {
+    return null;
+  }
+
+  const { type, name, url, referrer, screenWidth, screenHeight, language, customData, errorMessage, stackTrace } = payload;
+
+  if (typeof type !== "string" || !["pageView", "custom", "jsError"].includes(type)) {
+    return null;
+  }
+  if (typeof url !== "string" || url.length === 0) {
+    return null;
+  }
+  if (type === "custom" && (typeof name !== "string" || name.length === 0)) {
+    return null;
+  }
+  if (type === "jsError" && (typeof errorMessage !== "string" || errorMessage.length === 0)) {
+    return null;
+  }
+
+  const sanitized = { type };
+
+  try {
+    const urlObject = new URL(url);
+    sanitized.url = urlObject.href.substring(0, 2048);
+  } catch (e) {
+    return null;
+  }
+
+  if (type === "custom") {
+    sanitized.name = name
+      .replace(/[\x00-\x1F\x7F-\x9F]/g, "")
+      .trim()
+      .substring(0, 100);
+    if (sanitized.name.length === 0) {
+      return null;
+    }
+  } else {
+    sanitized.name = name;
+  }
+
+  if (type === "jsError") {
+    sanitized.name = "jsError";
+  }
+
+  if (referrer !== undefined) {
+    if (typeof referrer !== "string") return null;
+    sanitized.referrer = referrer.substring(0, 2048);
+  }
+
+  if (screenWidth !== undefined) {
+    if (typeof screenWidth !== "number") return null;
+    sanitized.screenWidth = Math.max(0, Math.min(screenWidth, 10000));
+  }
+
+  if (screenHeight !== undefined) {
+    if (typeof screenHeight !== "number") return null;
+    sanitized.screenHeight = Math.max(0, Math.min(screenHeight, 10000));
+  }
+
+  if (language !== undefined) {
+    if (typeof language !== "string") return null;
+    sanitized.language = language
+      .replace(/[\x00-\x1F\x7F-\x9F]/g, "")
+      .trim()
+      .substring(0, 35);
+  }
+
+  if (customData !== undefined) {
+    if (typeof customData !== "object" || customData === null || Array.isArray(customData)) {
+      return null;
+    }
+    try {
+      const customDataString = JSON.stringify(customData);
+      if (customDataString.length > 8192) {
+        return null;
+      }
+      sanitized.customData = JSON.parse(customDataString);
+    } catch (e) {
+      return null;
+    }
+  }
+
+  if (errorMessage !== undefined) {
+    if (typeof errorMessage !== "string") return null;
+    sanitized.errorMessage = errorMessage.substring(0, 512);
+  }
+
+  if (stackTrace !== undefined) {
+    if (typeof stackTrace !== "string") return null;
+    sanitized.stackTrace = stackTrace.substring(0, 4096);
+  }
+
+  return sanitized;
+}
+
+/**
+ * Extracts a clean hostname from a string that might be a full URL.
+ * @param {string | null | undefined} domainStr The domain string to process.
+ * @returns {string | null} The sanitized hostname or null.
+ */
+function getSanitizedDomain(domainStr) {
+  if (!domainStr) return null;
+  const hostname = domainStr.trim();
+  try {
+    return new URL(hostname).hostname;
+  } catch (e) {
+    try {
+      return new URL(`https://${hostname}`).hostname;
+    } catch (e2) {
+      return hostname;
+    }
+  }
+}
+
 module.exports = {
   detectBot,
   parseUserAgent,
   extractRequestData,
   generateVisitorId,
+  validateAndSanitizeApiPayload,
+  getSanitizedDomain,
 };
