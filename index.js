@@ -143,6 +143,7 @@ class SkoposSDK {
       siteId: this.siteId,
       ip,
       userAgent,
+      headers: req.headers,
       path,
       type: payload.type,
       name: payload.name,
@@ -171,12 +172,13 @@ class SkoposSDK {
       return;
     }
 
-    const { ip, userAgent, path, referrer } = extractRequestData(req);
+    const { ip, userAgent, path, referrer, headers } = extractRequestData(req);
 
     this._processAndQueueEvent({
       siteId: siteToTrack,
       ip,
       userAgent,
+      headers,
       path,
       type: "custom",
       name: eventName,
@@ -475,10 +477,24 @@ class SkoposSDK {
    * Handles bot checks, session creation & update, and batching logic.
    * @private
    * @param {object} data Consolidated event data (see code for structure).
+   * @param {string | undefined} data.siteId The site's tracking ID.
+   * @param {string | undefined} data.ip The IP address of the request.
+   * @param {string | undefined} data.userAgent The User-Agent string.
+   * @param {object | undefined} data.headers All request headers.
+   * @param {string | undefined} data.path The URL path.
+   * @param {'pageView' | 'custom' | 'jsError'} data.type The event type.
+   * @param {string | undefined} data.name The event name (for custom events).
+   * @param {string | undefined} data.referrer The referrer URL.
+   * @param {number | undefined} data.screenWidth The screen width.
+   * @param {number | undefined} data.screenHeight The screen height.
+   * @param {string | undefined} data.language The browser language.
+   * @param {Record<string, any> | undefined} data.customData Custom event data.
+   * @param {string | undefined} data.errorMessage Error message for JS errors.
+   * @param {string | undefined} data.stackTrace Stack trace for JS errors.
    * @returns {Promise<void>}
    */
   async _processAndQueueEvent(data) {
-    const { siteId, ip, userAgent, path, type, name, referrer, screenWidth, screenHeight, language, customData, errorMessage, stackTrace } = data;
+    const { siteId, ip, userAgent, headers, path, type, name, referrer, screenWidth, screenHeight, language, customData, errorMessage, stackTrace } = data;
 
     if (this.isArchived) {
       return;
@@ -502,7 +518,7 @@ class SkoposSDK {
       }
     }
 
-    if (detectBot(userAgent)) {
+    if (detectBot(userAgent, headers)) {
       return;
     }
 

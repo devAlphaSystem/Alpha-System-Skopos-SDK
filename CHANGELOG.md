@@ -1,3 +1,21 @@
+# 0.10.0
+
+#### Added
+
+- Introduced a new score-based system for bot detection, leveraging multiple indicators from user-agent strings and request headers to identify bots more accurately.
+
+#### Changed
+
+- Enhanced bot detection logic to utilize full request headers in addition to the User-Agent string, allowing for more comprehensive bot identification.
+- The SDK now extracts and passes all incoming request headers to internal processing for improved context and bot detection.
+- Improved the robustness of visitor ID generation by providing default "unknown" values when IP address or User-Agent are unavailable, ensuring consistent ID creation.
+
+#### Fixed
+
+- Ensured graceful handling of undefined User-Agent strings in parsing utilities to prevent potential errors.
+
+---
+
 # 0.9.0
 
 #### Added
