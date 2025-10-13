@@ -37,6 +37,7 @@ class SkoposSDK {
     this.siteId = options.siteId;
     this.websiteRecordId = null;
     this.disableLocalhostTracking = false;
+    this.isArchived = false;
     this.ipBlacklist = [];
     this.sessionTimeout = options.sessionTimeoutMs ?? DEFAULT_SESSION_TIMEOUT_MS;
     this.sessionCache = new Map();
@@ -94,6 +95,7 @@ class SkoposSDK {
       const websiteRecord = await sdk.pb.collection("websites").getFirstListItem(`trackingId="${options.siteId}"`);
       sdk.websiteRecordId = websiteRecord.id;
       sdk.disableLocalhostTracking = websiteRecord.disableLocalhostTracking;
+      sdk.isArchived = websiteRecord.isArchived || false;
       sdk.ipBlacklist = websiteRecord.ipBlacklist || [];
     } catch (error) {
       if (error.status === 404) {
@@ -467,6 +469,10 @@ class SkoposSDK {
   async _processAndQueueEvent(data) {
     const { siteId, ip, userAgent, path, type, name, referrer, screenWidth, screenHeight, language, customData, errorMessage, stackTrace } = data;
 
+    if (this.isArchived) {
+      return;
+    }
+
     if (this.ipBlacklist.includes(ip)) {
       return;
     }
@@ -665,6 +671,7 @@ class SkoposSDK {
       });
       this.disableLocalhostTracking = websiteRecord.disableLocalhostTracking;
       this.ipBlacklist = websiteRecord.ipBlacklist || [];
+      this.isArchived = websiteRecord.isArchived || false;
     } catch (error) {
       console.error("SkoposSDK: Failed to refresh website configuration.", error);
     }

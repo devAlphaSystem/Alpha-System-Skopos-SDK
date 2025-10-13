@@ -1,3 +1,16 @@
+# 0.8.0
+
+#### Added
+
+- Added a new `isArchived` property to the SDK, enabling the system to identify and respect the archival status of a website.
+- Implemented logic to automatically halt the processing of all tracking events for websites that are marked as archived.
+
+#### Changed
+
+- Upgraded the `ua-parser-js` dependency to version 2.0.6.
+
+---
+
 # 0.7.0
 
 #### Removed
