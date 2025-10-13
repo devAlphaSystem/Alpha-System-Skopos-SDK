@@ -1,3 +1,6 @@
+const { EventSource } = require("eventsource");
+global.EventSource = EventSource;
+
 const PocketBase = require("pocketbase/cjs");
 const geoip = require("geoip-lite");
 const ipaddr = require("ipaddr.js");
@@ -16,7 +19,6 @@ const DEFAULT_SESSION_TIMEOUT_MS = 1000 * 60 * 30;
 const DEFAULT_ERROR_BATCH_INTERVAL_MS = 1000 * 60 * 5;
 const SUMMARY_FLUSH_INTERVAL_MS = 5000;
 const SESSION_CACHE_CLEANUP_INTERVAL_MS = 1000 * 60 * 5;
-const DEFAULT_CONFIG_REFRESH_INTERVAL_MS = 1000 * 60 * 15;
 
 /**
  * The main Skopos SDK class for server-side event tracking.
@@ -48,14 +50,12 @@ class SkoposSDK {
     this.summaryTimer = null;
     this.cacheTimer = null;
     this.jsErrorTimer = null;
-    this.configRefreshTimer = null;
 
     this.batchingEnabled = options.batch ?? false;
     this.batchInterval = options.batchInterval ?? DEFAULT_BATCH_INTERVAL_MS;
     this.maxBatchSize = options.maxBatchSize ?? DEFAULT_MAX_BATCH_SIZE;
 
     const jsErrorBatchInterval = options.jsErrorBatchInterval ?? DEFAULT_ERROR_BATCH_INTERVAL_MS;
-    const configRefreshInterval = options.configRefreshIntervalMs ?? DEFAULT_CONFIG_REFRESH_INTERVAL_MS;
 
     if (this.batchingEnabled) {
       this.eventTimer = setInterval(() => this.flushEvents(), this.batchInterval);
@@ -63,7 +63,6 @@ class SkoposSDK {
     this.summaryTimer = setInterval(() => this._flushSummaries(), SUMMARY_FLUSH_INTERVAL_MS);
     this.cacheTimer = setInterval(() => this._cleanSessionCache(), SESSION_CACHE_CLEANUP_INTERVAL_MS);
     this.jsErrorTimer = setInterval(() => this._flushJsErrors(), jsErrorBatchInterval);
-    this.configRefreshTimer = setInterval(() => this._refreshWebsiteConfig(), configRefreshInterval);
   }
 
   /**
@@ -103,6 +102,18 @@ class SkoposSDK {
       }
       console.error("SkoposSDK: Failed to fetch website by trackingId.", error);
       throw new Error("SkoposSDK: Could not initialize with provided siteId.");
+    }
+
+    try {
+      await sdk.pb.collection("websites").subscribe(sdk.websiteRecordId, (e) => {
+        if (e.action === "update") {
+          sdk.disableLocalhostTracking = e.record.disableLocalhostTracking;
+          sdk.ipBlacklist = e.record.ipBlacklist || [];
+          sdk.isArchived = e.record.isArchived || false;
+        }
+      });
+    } catch (err) {
+      console.error("SkoposSDK: Failed to subscribe to website configuration changes.", err);
     }
 
     return sdk;
@@ -186,8 +197,8 @@ class SkoposSDK {
     if (this.summaryTimer) clearInterval(this.summaryTimer);
     if (this.cacheTimer) clearInterval(this.cacheTimer);
     if (this.jsErrorTimer) clearInterval(this.jsErrorTimer);
-    if (this.configRefreshTimer) clearInterval(this.configRefreshTimer);
     this._cleanSessionCache();
+    await this.pb.realtime.unsubscribe();
     await this.flushEvents();
     await this._flushJsErrors();
     await this._flushSummaries();
@@ -653,27 +664,6 @@ class SkoposSDK {
       await this.pb.collection(EVENTS_COLLECTION).create(eventPayload);
     } catch (error) {
       console.error("SkoposSDK: Failed to send event.", error);
-    }
-  }
-
-  /**
-   * Periodically re-fetches the website configuration from PocketBase.
-   * @private
-   * @returns {Promise<void>}
-   */
-  async _refreshWebsiteConfig() {
-    if (!this.websiteRecordId) {
-      return;
-    }
-    try {
-      const websiteRecord = await this.pb.collection("websites").getOne(this.websiteRecordId, {
-        $autoCancel: false,
-      });
-      this.disableLocalhostTracking = websiteRecord.disableLocalhostTracking;
-      this.ipBlacklist = websiteRecord.ipBlacklist || [];
-      this.isArchived = websiteRecord.isArchived || false;
-    } catch (error) {
-      console.error("SkoposSDK: Failed to refresh website configuration.", error);
     }
   }
 }

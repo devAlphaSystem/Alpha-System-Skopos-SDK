@@ -1,3 +1,17 @@
+# 0.9.0
+
+#### Added
+
+- Implemented real-time updates for website configuration, allowing immediate synchronization of settings such as IP blacklists, localhost tracking preferences, and archival status.
+- Added `eventsource` dependency to support real-time subscriptions.
+
+#### Removed
+
+- The `configRefreshIntervalMs` SDK option has been removed.
+- The periodic website configuration refresh mechanism (polling) has been removed, as it has been replaced by a real-time subscription system.
+
+---
+
 # 0.8.0
 
 #### Added
