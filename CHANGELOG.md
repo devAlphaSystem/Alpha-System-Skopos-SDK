@@ -1,3 +1,15 @@
+# 0.11.2
+
+#### Changed
+
+- Improved the admin authentication mechanism by replacing the periodic token refresh with an on-demand re-authentication process, ensuring a valid session before all PocketBase interactions. This simplifies the SDK's internal lifecycle management.
+
+#### Removed
+
+- The adminAuthRefreshTimer and the associated \_refreshAdminAuth method, as periodic token refreshing is no longer required with the new on-demand authentication strategy.
+
+---
+
 # 0.11.1
 
 #### Added
