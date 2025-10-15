@@ -1,3 +1,11 @@
+# 0.11.1
+
+#### Added
+
+- Implemented automatic periodic refreshing of the admin authentication token to prevent session expiration.
+
+---
+
 # 0.11.0
 
 #### Added

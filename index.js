@@ -19,6 +19,7 @@ const DEFAULT_SESSION_TIMEOUT_MS = 1000 * 60 * 30;
 const DEFAULT_ERROR_BATCH_INTERVAL_MS = 1000 * 60 * 5;
 const SUMMARY_FLUSH_INTERVAL_MS = 5000;
 const SESSION_CACHE_CLEANUP_INTERVAL_MS = 1000 * 60 * 5;
+const ADMIN_AUTH_REFRESH_INTERVAL_MS = 15 * 60 * 1000;
 
 /**
  * The main Skopos SDK class for server-side event tracking.
@@ -51,6 +52,8 @@ class SkoposSDK {
     this.summaryTimer = null;
     this.cacheTimer = null;
     this.jsErrorTimer = null;
+    this.adminAuthRefreshTimer = null;
+    this.adminCredentials = null;
 
     this.batchingEnabled = options.batch ?? false;
     this.batchInterval = options.batchInterval ?? DEFAULT_BATCH_INTERVAL_MS;
@@ -82,9 +85,11 @@ class SkoposSDK {
     const sdk = new SkoposSDK(options);
 
     if (options.adminEmail && options.adminPassword) {
+      sdk.adminCredentials = { email: options.adminEmail, password: options.adminPassword };
       try {
         await sdk.pb.collection("_superusers").authWithPassword(options.adminEmail, options.adminPassword);
         sdk.pb.autoCancellation(false);
+        sdk.adminAuthRefreshTimer = setInterval(() => sdk._refreshAdminAuth(), ADMIN_AUTH_REFRESH_INTERVAL_MS);
       } catch (error) {
         console.error("SkoposSDK: Admin authentication failed.", error);
         throw new Error("SkoposSDK: Could not authenticate with PocketBase.");
@@ -221,6 +226,7 @@ class SkoposSDK {
     if (this.summaryTimer) clearInterval(this.summaryTimer);
     if (this.cacheTimer) clearInterval(this.cacheTimer);
     if (this.jsErrorTimer) clearInterval(this.jsErrorTimer);
+    if (this.adminAuthRefreshTimer) clearInterval(this.adminAuthRefreshTimer);
     this._cleanSessionCache();
     await this.pb.realtime.unsubscribe();
     await this.flushEvents();
@@ -242,6 +248,22 @@ class SkoposSDK {
 
     const promises = eventsToSend.map((event) => this._sendEvent(event));
     await Promise.allSettled(promises);
+  }
+
+  /**
+   * Periodically re-authenticates the admin user to keep the token valid.
+   * @private
+   */
+  async _refreshAdminAuth() {
+    if (!this.adminCredentials) {
+      return;
+    }
+    try {
+      await this.pb.collection("_superusers").authWithPassword(this.adminCredentials.email, this.adminCredentials.password);
+      console.log("SkoposSDK: Admin authentication token refreshed successfully.");
+    } catch (error) {
+      console.error("SkoposSDK: Failed to refresh admin authentication token.", error);
+    }
   }
 
   /**
