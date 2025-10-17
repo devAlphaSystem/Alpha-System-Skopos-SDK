@@ -31,9 +31,14 @@ class SkoposSDK {
    * @param {import('./index').SkoposSDKOptions} options SDK configuration options.
    */
   constructor(options) {
+    this.startTime = Date.now();
     if (!options.pocketbaseUrl) {
+      console.error("SkoposSDK: 'pocketbaseUrl' is a required option.");
       throw new Error("SkoposSDK: 'pocketbaseUrl' is required.");
     }
+
+    this.debug = options.debug ?? false;
+    this._log("info", "Instance created. Debug mode enabled.");
 
     this.pb = new PocketBase(options.pocketbaseUrl);
     this.siteId = options.siteId;
@@ -61,11 +66,46 @@ class SkoposSDK {
     const jsErrorBatchInterval = options.jsErrorBatchInterval ?? DEFAULT_ERROR_BATCH_INTERVAL_MS;
 
     if (this.batchingEnabled) {
+      this._log("info", `Batching enabled. Interval: ${this.batchInterval}ms, Max size: ${this.maxBatchSize}.`);
       this.eventTimer = setInterval(() => this.flushEvents(), this.batchInterval);
+    } else {
+      this._log("info", "Batching disabled. Events will be sent immediately.");
     }
     this.summaryTimer = setInterval(() => this._flushSummaries(), SUMMARY_FLUSH_INTERVAL_MS);
     this.cacheTimer = setInterval(() => this._cleanSessionCache(), SESSION_CACHE_CLEANUP_INTERVAL_MS);
     this.jsErrorTimer = setInterval(() => this._flushJsErrors(), jsErrorBatchInterval);
+  }
+
+  /**
+   * Internal logging method with timestamp.
+   * @private
+   * @param {'error' | 'warn' | 'info' | 'debug'} level The log level.
+   * @param  {...any} args The messages to log.
+   */
+  _log(level, ...args) {
+    const elapsedTime = ((Date.now() - this.startTime) / 1000).toFixed(3);
+    const prefix = `SkoposSDK [${elapsedTime}s]:`;
+
+    if (level === "error") {
+      console.error(prefix, ...args);
+      return;
+    }
+
+    if (this.debug) {
+      switch (level) {
+        case "warn":
+          console.warn(prefix, ...args);
+          break;
+        case "info":
+          console.info(prefix, ...args);
+          break;
+        case "debug":
+          console.debug(prefix, ...args);
+          break;
+        default:
+          console.log(prefix, ...args);
+      }
+    }
   }
 
   /**
@@ -78,22 +118,27 @@ class SkoposSDK {
    */
   static async init(options) {
     if (!options.siteId) {
+      console.error("SkoposSDK: 'siteId' is a required option for init.");
       throw new Error("SkoposSDK: 'siteId' is a required option for init.");
     }
 
     const sdk = new SkoposSDK(options);
+    sdk._log("info", "Initializing...");
 
     if (options.adminEmail && options.adminPassword) {
       try {
+        sdk._log("debug", "Attempting admin authentication...");
         await sdk.pb.collection("_superusers").authWithPassword(options.adminEmail, options.adminPassword);
         sdk.pb.autoCancellation(false);
+        sdk._log("info", "Admin authentication successful.");
       } catch (error) {
-        console.error("SkoposSDK: Admin authentication failed.", error);
+        sdk._log("error", "Admin authentication failed.", error);
         throw new Error("SkoposSDK: Could not authenticate with PocketBase.");
       }
     }
 
     try {
+      sdk._log("debug", `Fetching website configuration for siteId: ${options.siteId}`);
       await sdk._ensureAdminAuth();
       const websiteRecord = await sdk.pb.collection("websites").getFirstListItem(`trackingId="${options.siteId}"`);
       sdk.websiteRecordId = websiteRecord.id;
@@ -101,28 +146,33 @@ class SkoposSDK {
       sdk.disableLocalhostTracking = websiteRecord.disableLocalhostTracking;
       sdk.isArchived = websiteRecord.isArchived || false;
       sdk.ipBlacklist = websiteRecord.ipBlacklist || [];
+      sdk._log("info", `Successfully loaded configuration for website: ${sdk.domain || sdk.websiteRecordId}`);
     } catch (error) {
       if (error.status === 404) {
         throw new Error(`SkoposSDK: Website with trackingId "${options.siteId}" not found.`);
       }
-      console.error("SkoposSDK: Failed to fetch website by trackingId.", error);
+      sdk._log("error", "Failed to fetch website by trackingId.", error);
       throw new Error("SkoposSDK: Could not initialize with provided siteId.");
     }
 
     try {
+      sdk._log("debug", `Subscribing to configuration changes for website: ${sdk.websiteRecordId}`);
       await sdk._ensureAdminAuth();
       await sdk.pb.collection("websites").subscribe(sdk.websiteRecordId, (e) => {
         if (e.action === "update") {
+          sdk._log("info", "Received real-time update for website configuration.");
           sdk.domain = getSanitizedDomain(e.record.domain);
           sdk.disableLocalhostTracking = e.record.disableLocalhostTracking;
           sdk.ipBlacklist = e.record.ipBlacklist || [];
           sdk.isArchived = e.record.isArchived || false;
         }
       });
+      sdk._log("info", "Successfully subscribed to configuration changes.");
     } catch (err) {
-      console.error("SkoposSDK: Failed to subscribe to website configuration changes.", err);
+      sdk._log("error", "Failed to subscribe to website configuration changes.", err);
     }
 
+    sdk._log("info", "Initialization complete.");
     return sdk;
   }
 
@@ -134,9 +184,11 @@ class SkoposSDK {
    * @returns {Promise<void>|void}
    */
   trackApiEvent(req, payload) {
+    this._log("debug", "trackApiEvent called.");
     const sanitizedPayload = validateAndSanitizeApiPayload(payload);
 
     if (!sanitizedPayload) {
+      this._log("warn", "trackApiEvent rejected due to invalid or unsanitized payload.", { payload });
       return;
     }
 
@@ -146,9 +198,11 @@ class SkoposSDK {
         const siteDomain = this.domain.replace(/^www\./, "");
 
         if (payloadHostname !== siteDomain && !payloadHostname.endsWith(`.${siteDomain}`)) {
+          this._log("warn", `trackApiEvent rejected. Payload URL hostname "${payloadHostname}" does not match site domain "${this.domain}".`);
           return;
         }
       } catch (e) {
+        this._log("warn", `trackApiEvent rejected due to invalid payload URL: ${sanitizedPayload.url}`);
         return;
       }
     }
@@ -164,6 +218,12 @@ class SkoposSDK {
         path = sanitizedPayload.url;
       }
     }
+
+    this._log("debug", "Processing API event with data:", {
+      path,
+      type: sanitizedPayload.type,
+      name: sanitizedPayload.name,
+    });
 
     this._processAndQueueEvent({
       siteId: this.siteId,
@@ -192,13 +252,20 @@ class SkoposSDK {
    * @returns {Promise<void>|void}
    */
   trackServerEvent(req, eventName, customData = {}, siteId) {
+    this._log("debug", `trackServerEvent called for event: "${eventName}"`);
     const siteToTrack = siteId || this.siteId;
     if (!siteToTrack) {
-      console.error("SkoposSDK: Cannot track server event. No siteId provided.");
+      this._log("error", "Cannot track server event. No siteId provided.");
       return;
     }
 
     const { ip, userAgent, path, referrer, headers } = extractRequestData(req);
+
+    this._log("debug", "Processing server event with data:", {
+      eventName,
+      path,
+      siteToTrack,
+    });
 
     this._processAndQueueEvent({
       siteId: siteToTrack,
@@ -221,15 +288,20 @@ class SkoposSDK {
    * await sdk.shutdown();
    */
   async shutdown() {
+    this._log("info", "Shutdown initiated.");
     if (this.eventTimer) clearInterval(this.eventTimer);
     if (this.summaryTimer) clearInterval(this.summaryTimer);
     if (this.cacheTimer) clearInterval(this.cacheTimer);
     if (this.jsErrorTimer) clearInterval(this.jsErrorTimer);
+    this._log("debug", "All timers cleared.");
     this._cleanSessionCache();
     await this.pb.realtime.unsubscribe();
+    this._log("debug", "Unsubscribed from real-time updates.");
     await this.flushEvents();
     await this._flushJsErrors();
     await this._flushSummaries();
+    this._log("info", "All queues have been flushed.");
+    this._log("info", "Shutdown complete.");
   }
 
   /**
@@ -238,11 +310,13 @@ class SkoposSDK {
    */
   async flushEvents() {
     if (this.eventQueue.length === 0) {
+      this._log("debug", "flushEvents called, but event queue is empty.");
       return;
     }
 
     const eventsToSend = [...this.eventQueue];
     this.eventQueue = [];
+    this._log("info", `Flushing ${eventsToSend.length} events.`);
 
     const promises = eventsToSend.map((event) => this._sendEvent(event));
     await Promise.allSettled(promises);
@@ -253,12 +327,19 @@ class SkoposSDK {
    */
   async _ensureAdminAuth() {
     if (this.pb.authStore.isValid || !this.adminEmail) {
+      if (!this.adminEmail) {
+        this._log("debug", "_ensureAdminAuth skipped: no admin credentials provided.");
+      } else {
+        this._log("debug", "_ensureAdminAuth skipped: token is still valid.");
+      }
       return;
     }
     try {
+      this._log("info", "Admin token expired or invalid. Re-authenticating...");
       await this.pb.collection("_superusers").authWithPassword(this.adminEmail, this.adminPassword);
+      this._log("info", "Re-authentication successful.");
     } catch (error) {
-      console.error("SkoposSDK: Failed to re-authenticate admin.", error);
+      this._log("error", "Failed to re-authenticate admin.", error);
     }
   }
 
@@ -279,6 +360,7 @@ class SkoposSDK {
 
     let summary = this.summaryQueue.get(summaryDateString);
     if (!summary) {
+      this._log("debug", `Creating new in-memory summary for date: ${summaryDateString}`);
       summary = {
         pageViews: 0,
         visitors: 0,
@@ -356,14 +438,17 @@ class SkoposSDK {
    */
   async _flushSummaries() {
     if (this.summaryQueue.size === 0) {
+      this._log("debug", "_flushSummaries called, but summary queue is empty.");
       return;
     }
 
+    this._log("info", `Flushing ${this.summaryQueue.size} daily summaries.`);
     await this._ensureAdminAuth();
     const summariesToFlush = new Map(this.summaryQueue);
     this.summaryQueue.clear();
 
     for (const [dateString, summaryData] of summariesToFlush.entries()) {
+      this._log("debug", `Flushing summary for date: ${dateString}`);
       const filter = `website="${this.websiteRecordId}" && date ~ "${dateString}%"`;
       let summaryRecord;
 
@@ -372,6 +457,7 @@ class SkoposSDK {
       } catch (error) {
         if (error.status === 404) {
           try {
+            this._log("debug", `No summary record found for ${dateString}, creating a new one.`);
             const initialSummary = {
               pageViews: 0,
               visitors: 0,
@@ -398,15 +484,16 @@ class SkoposSDK {
             });
           } catch (creationError) {
             if (creationError.status === 400) {
+              this._log("warn", "Race condition detected on summary creation, re-fetching.");
               await new Promise((resolve) => setTimeout(resolve, 100));
               summaryRecord = await this.pb.collection(SUMMARIES_COLLECTION).getFirstListItem(filter);
             } else {
-              console.error("SkoposSDK: Error creating summary record.", creationError);
+              this._log("error", "Error creating summary record.", creationError);
               continue;
             }
           }
         } else {
-          console.error("SkoposSDK: Error fetching summary record.", error);
+          this._log("error", "Error fetching summary record.", error);
           continue;
         }
       }
@@ -448,8 +535,9 @@ class SkoposSDK {
 
       try {
         await this.pb.collection(SUMMARIES_COLLECTION).update(summaryRecord.id, { summary: currentSummary });
+        this._log("debug", `Successfully flushed summary for ${dateString}.`);
       } catch (updateError) {
-        console.error("SkoposSDK: Failed to flush dashboard summary.", updateError);
+        this._log("error", "Failed to flush dashboard summary.", updateError);
       }
     }
   }
@@ -462,9 +550,11 @@ class SkoposSDK {
    */
   async _flushJsErrors() {
     if (this.jsErrorQueue.size === 0) {
+      this._log("debug", "_flushJsErrors called, but JS error queue is empty.");
       return;
     }
 
+    this._log("info", `Flushing ${this.jsErrorQueue.size} unique JS errors.`);
     await this._ensureAdminAuth();
     const errorsToFlush = new Map(this.jsErrorQueue);
     this.jsErrorQueue.clear();
@@ -476,9 +566,11 @@ class SkoposSDK {
           "count+": errorData.count,
           lastSeen: new Date().toISOString(),
         });
+        this._log("debug", `Updated JS error: ${hash}`);
       } catch (error) {
         if (error.status === 404) {
           try {
+            this._log("debug", `Creating new JS error: ${hash}`);
             await this.pb.collection(ERRORS_COLLECTION).create({
               website: this.websiteRecordId,
               session: errorData.sessionId,
@@ -490,10 +582,10 @@ class SkoposSDK {
               lastSeen: new Date().toISOString(),
             });
           } catch (createError) {
-            console.error("SkoposSDK: Failed to create new JS error record.", createError);
+            this._log("error", "Failed to create new JS error record.", createError);
           }
         } else {
-          console.error("SkoposSDK: Failed to find or update JS error record.", error);
+          this._log("error", "Failed to find or update JS error record.", error);
         }
       }
     }
@@ -504,13 +596,20 @@ class SkoposSDK {
    * @private
    */
   _cleanSessionCache() {
+    this._log("debug", "Running session cache cleanup...");
     const now = Date.now();
+    let cleanedCount = 0;
     for (const [visitorId, sessionData] of this.sessionCache.entries()) {
       if (now - sessionData.lastActivity > this.sessionTimeout) {
+        this._log("debug", `Expiring session for visitorId: ${visitorId}`);
         const lastActivityDate = new Date(sessionData.lastActivity);
         this._updateDashboardSummary({ expiredSessionPath: sessionData.lastPath }, lastActivityDate);
         this.sessionCache.delete(visitorId);
+        cleanedCount++;
       }
+    }
+    if (cleanedCount > 0) {
+      this._log("info", `Cleaned ${cleanedCount} expired sessions from cache.`);
     }
   }
 
@@ -538,11 +637,18 @@ class SkoposSDK {
   async _processAndQueueEvent(data) {
     const { siteId, ip, userAgent, headers, path, type, name, referrer, screenWidth, screenHeight, language, customData, errorMessage, stackTrace } = data;
 
+    this._log("debug", "Processing event", {
+      type: data.type,
+      path: data.path,
+    });
+
     if (this.isArchived) {
+      this._log("warn", "Event ignored, website is archived.");
       return;
     }
 
     if (this.ipBlacklist.includes(ip)) {
+      this._log("warn", `Event ignored, IP ${ip} is in blacklist.`);
       return;
     }
 
@@ -553,14 +659,16 @@ class SkoposSDK {
           addr = addr.toIPv4Address();
         }
         if (addr.range() === "loopback") {
+          this._log("warn", "Event ignored, localhost tracking is disabled.");
           return;
         }
       } catch (e) {
-        // Ignore invalid IPs
+        this._log("warn", `Could not parse IP address: ${ip}`);
       }
     }
 
     if (detectBot(userAgent, headers)) {
+      this._log("warn", "Event ignored, bot detected.", { userAgent });
       return;
     }
 
@@ -573,6 +681,7 @@ class SkoposSDK {
         country = geo.country;
       }
     }
+    this._log("debug", `GeoIP lookup for ${ip}: ${country}`);
 
     const visitorId = generateVisitorId(siteId, ip, userAgent);
     const now = Date.now();
@@ -593,17 +702,21 @@ class SkoposSDK {
         isEngaged = true;
       }
 
+      this._log("debug", `Existing session found for visitor ${visitorId}: ${sessionId}`);
+
       this.pb
         .collection(SESSIONS_COLLECTION)
         .update(sessionId, {})
         .catch((err) => {
           if (err.status === 404) {
+            this._log("warn", `Session ${sessionId} not found in DB, removing from cache.`);
             this.sessionCache.delete(visitorId);
           }
-          console.error(`SkoposSDK: Failed to update session for ${sessionId}.`, err.message);
+          this._log("error", `Failed to update session for ${sessionId}.`, err.message);
         });
     } else {
       isNewSession = true;
+      this._log("info", `No active session found for visitor ${visitorId}. Creating a new one.`);
       if (cachedSession) {
         const lastActivityDate = new Date(cachedSession.lastActivity);
         this._updateDashboardSummary({ expiredSessionPath: cachedSession.lastPath }, lastActivityDate);
@@ -618,10 +731,12 @@ class SkoposSDK {
           visitor = await this.pb.collection(VISITORS_COLLECTION).create({ website: this.websiteRecordId, visitorId });
           isNewVisitor = true;
         } else {
-          console.error("SkoposSDK: Error finding or creating visitor.", e);
+          this._log("error", "Error finding or creating visitor.", e);
           return;
         }
       }
+
+      this._log("info", `Visitor is a ${isNewVisitor ? "new visitor" : "returning visitor"}.`);
 
       const uaDetails = parseUserAgent(userAgent);
       const sessionData = {
@@ -643,6 +758,7 @@ class SkoposSDK {
       try {
         const newSession = await this.pb.collection(SESSIONS_COLLECTION).create(sessionData);
         sessionId = newSession.id;
+        this._log("info", `New session created: ${sessionId} for visitor ${visitor.id}`);
 
         let sessionIsEngaged = false;
         if (customData?.duration && customData.duration > 10) {
@@ -654,7 +770,7 @@ class SkoposSDK {
 
         this._updateDashboardSummary({ ...data, ...uaDetails, country, isNewSession, isNewVisitor, isEngaged });
       } catch (e) {
-        console.error("SkoposSDK: Error creating session.", e);
+        this._log("error", "Error creating session.", e);
         return;
       }
     }
@@ -687,6 +803,7 @@ class SkoposSDK {
           count: 1,
         });
       }
+      this._log("debug", "Queued JS error report.");
       return;
     }
 
@@ -704,10 +821,13 @@ class SkoposSDK {
 
     if (this.batchingEnabled) {
       this.eventQueue.push(eventPayload);
+      this._log("debug", `Event pushed to queue. Queue size: ${this.eventQueue.length}`);
       if (this.eventQueue.length >= this.maxBatchSize) {
+        this._log("info", "Max batch size reached, flushing events.");
         this.flushEvents();
       }
     } else {
+      this._log("debug", "Sending event immediately (batching disabled).");
       this._sendEvent(eventPayload);
     }
   }
@@ -721,10 +841,11 @@ class SkoposSDK {
    */
   async _sendEvent(eventPayload) {
     try {
+      this._log("debug", "Sending event to PocketBase:", eventPayload);
       await this._ensureAdminAuth();
       await this.pb.collection(EVENTS_COLLECTION).create(eventPayload);
     } catch (error) {
-      console.error("SkoposSDK: Failed to send event.", error);
+      this._log("error", "Failed to send event.", error.originalError?.data || error.message);
     }
   }
 }

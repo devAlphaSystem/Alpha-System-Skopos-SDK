@@ -1,3 +1,17 @@
+# 0.12.0
+
+#### Added
+
+- Added a new `debug` option to `SkoposSDKOptions` to enable verbose logging for debugging purposes.
+- Introduced an internal, timestamped logging utility to provide clearer, level-based insight into SDK operations.
+
+#### Changed
+
+- Significantly enhanced the SDK's internal logging capabilities, replacing direct console calls with a structured, level-based system.
+- Standardized error messages across the SDK for improved consistency.
+
+---
+
 # 0.11.2
 
 #### Changed

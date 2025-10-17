@@ -55,6 +55,13 @@ export interface SkoposSDKOptions {
    * @default 300000 (5 minutes)
    */
   jsErrorBatchInterval?: number;
+
+  /**
+   * Set to `true` to enable verbose logging for debugging.
+   * Error logs are always enabled.
+   * @default false
+   */
+  debug?: boolean;
 }
 
 /**
