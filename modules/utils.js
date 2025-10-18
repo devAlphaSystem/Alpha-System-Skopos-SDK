@@ -21,11 +21,11 @@ function calculateBotScore(userAgent, headers) {
     score += 80;
   }
 
-  if (userAgent && (/HeadlessChrome/i.test(userAgent) || /Puppeteer/i.test(userAgent) || /PhantomJS/i.test(userAgent) || /Selenium/i.test(userAgent) || /Crawl(er|bot)|Spider|Scraper|Monitor(ing)?|Archiver|Screenshot|Validator|Lighthouse|AhrefsBot|SemrushBot|MJ12bot|PetalBot|YandexBot|Bingbot|Googlebot|Baiduspider/i.test(userAgent))) {
+  if (userAgent && /HeadlessChrome|Puppeteer|PhantomJS|Selenium|Crawl(er|bot)|Spider|Scraper|Monitor(ing)?|Archiver|Screenshot|Validator|Lighthouse|AhrefsBot|SemrushBot|MJ12bot|PetalBot|YandexBot|Bingbot|Googlebot|Baiduspider/i.test(userAgent)) {
     score += 70;
   }
 
-  if (userAgent && (/^curl\//i.test(userAgent) || /^wget\//i.test(userAgent) || /^python-requests\//i.test(userAgent) || /^Go-http-client\//i.test(userAgent) || /^Java\//i.test(userAgent) || /^okhttp\//i.test(userAgent) || /^Apache-HttpClient\//i.test(userAgent))) {
+  if (userAgent && /^curl\/|^wget\/|^python-requests\/|^Go-http-client\/|^Java\/|^okhttp\/|^Apache-HttpClient\//i.test(userAgent)) {
     score += 60;
   }
 

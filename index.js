@@ -310,7 +310,6 @@ class SkoposSDK {
    */
   async flushEvents() {
     if (this.eventQueue.length === 0) {
-      this._log("debug", "flushEvents called, but event queue is empty.");
       return;
     }
 
@@ -438,7 +437,6 @@ class SkoposSDK {
    */
   async _flushSummaries() {
     if (this.summaryQueue.size === 0) {
-      this._log("debug", "_flushSummaries called, but summary queue is empty.");
       return;
     }
 
@@ -550,7 +548,6 @@ class SkoposSDK {
    */
   async _flushJsErrors() {
     if (this.jsErrorQueue.size === 0) {
-      this._log("debug", "_flushJsErrors called, but JS error queue is empty.");
       return;
     }
 

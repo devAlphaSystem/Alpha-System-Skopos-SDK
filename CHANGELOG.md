@@ -1,3 +1,12 @@
+# 0.12.1
+
+#### Changed
+
+- Optimized bot detection logic by streamlining user agent regex evaluations in `calculateBotScore`.
+- Reduced verbose debug logging when event, summary, and JavaScript error queues are empty.
+
+---
+
 # 0.12.0
 
 #### Added
