@@ -1,11 +1,11 @@
 {
   "name": "@alphasystem/skopos",
-  "version": "0.12.1",
+  "version": "0.12.2",
   "description": "The official server-side NodeJS SDK for Alpha System Skopos Analytics",
   "main": "index.js",
   "types": "index.d.ts",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "format": "prettier --write ."
   },
   "keywords": [
     "skopos",
@@ -26,7 +26,10 @@
     "geoip-lite": "^1.4.10",
     "ipaddr.js": "^2.2.0",
     "isbot": "^5.1.31",
-    "pocketbase": "^0.26.2",
+    "pocketbase": "^0.26.3",
     "ua-parser-js": "^2.0.6"
+  },
+  "devDependencies": {
+    "prettier": "^3.6.2"
   }
 }

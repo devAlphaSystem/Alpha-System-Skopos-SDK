@@ -1,3 +1,11 @@
+# 0.12.2
+
+#### Changed
+
+- Integrated Prettier into the development workflow, adding it as a development dependency and introducing a 'format' script for automated code formatting.
+
+---
+
 # 0.12.1
 
 #### Changed
