@@ -51,6 +51,7 @@ class SkoposSDK {
     this.ipBlacklist = [];
     this.sessionTimeout = options.sessionTimeoutMs ?? DEFAULT_SESSION_TIMEOUT_MS;
     this.sessionCache = new Map();
+    this.visitorCreationLocks = new Map();
     this.eventQueue = [];
     this.summaryQueue = new Map();
     this.jsErrorQueue = new Map();
@@ -315,33 +316,7 @@ class SkoposSDK {
     const visitorId = generateVisitorId(this.siteId, ip, userAgent);
 
     try {
-      await this._ensureAdminAuth();
-
-      let visitor;
-      try {
-        visitor = await this.pb.collection(VISITORS_COLLECTION).getFirstListItem(`visitorId="${visitorId}"`);
-        this._log("debug", `Found existing visitor ${visitorId}`);
-      } catch (error) {
-        if (error.status === 404) {
-          this._log("info", `No visitor found with visitorId: ${visitorId}. Creating new visitor.`);
-          try {
-            visitor = await this.pb.collection(VISITORS_COLLECTION).create({
-              website: this.websiteRecordId,
-              visitorId,
-            });
-            this._log("debug", `Created new visitor: ${visitor.id}`);
-          } catch (createError) {
-            if (createError.status === 400) {
-              this._log("warn", "Race condition detected on visitor creation, re-fetching.");
-              visitor = await this.pb.collection(VISITORS_COLLECTION).getFirstListItem(`visitorId="${visitorId}"`);
-            } else {
-              throw createError;
-            }
-          }
-        } else {
-          throw error;
-        }
-      }
+      const { visitor } = await this._getOrCreateVisitor(visitorId);
 
       const updateData = {
         userId: sanitizedUserId,
@@ -415,6 +390,59 @@ class SkoposSDK {
     }
 
     return sanitized;
+  }
+
+  /**
+   * Gets or creates a visitor with proper locking to prevent race conditions.
+   * @private
+   * @param {string} visitorId The hashed visitor ID.
+   * @returns {Promise<{visitor: object, isNewVisitor: boolean}>}
+   */
+  async _getOrCreateVisitor(visitorId) {
+    if (this.visitorCreationLocks.has(visitorId)) {
+      this._log("debug", `Waiting for ongoing visitor creation: ${visitorId}`);
+      return await this.visitorCreationLocks.get(visitorId);
+    }
+
+    const creationPromise = (async () => {
+      try {
+        await this._ensureAdminAuth();
+
+        try {
+          const visitor = await this.pb.collection(VISITORS_COLLECTION).getFirstListItem(`visitorId="${visitorId}"`);
+          this._log("debug", `Found existing visitor ${visitorId}`);
+          return { visitor, isNewVisitor: false };
+        } catch (error) {
+          if (error.status === 404) {
+            this._log("info", `Creating new visitor: ${visitorId}`);
+            try {
+              const visitor = await this.pb.collection(VISITORS_COLLECTION).create({
+                website: this.websiteRecordId,
+                visitorId,
+              });
+              this._log("debug", `Created new visitor: ${visitor.id}`);
+              return { visitor, isNewVisitor: true };
+            } catch (createError) {
+              if (createError.status === 400 || createError.data?.data?.visitorId) {
+                this._log("warn", "Race condition detected on visitor creation, re-fetching.");
+                const visitor = await this.pb.collection(VISITORS_COLLECTION).getFirstListItem(`visitorId="${visitorId}"`);
+                return { visitor, isNewVisitor: false };
+              }
+              throw createError;
+            }
+          }
+          throw error;
+        }
+      } finally {
+        setTimeout(() => {
+          this.visitorCreationLocks.delete(visitorId);
+        }, 1000);
+      }
+    })();
+
+    this.visitorCreationLocks.set(visitorId, creationPromise);
+
+    return await creationPromise;
   }
 
   /**
@@ -856,35 +884,8 @@ class SkoposSDK {
         this._updateDashboardSummary({ expiredSessionPath: cachedSession.lastPath }, lastActivityDate);
       }
 
-      let visitor;
-      try {
-        visitor = await this.pb.collection(VISITORS_COLLECTION).getFirstListItem(`visitorId="${visitorId}"`);
-        isNewVisitor = false;
-      } catch (e) {
-        if (e.status === 404) {
-          try {
-            visitor = await this.pb.collection(VISITORS_COLLECTION).create({ website: this.websiteRecordId, visitorId });
-            isNewVisitor = true;
-          } catch (createError) {
-            if (createError.status === 400) {
-              this._log("warn", "Race condition detected on visitor creation, re-fetching.");
-              try {
-                visitor = await this.pb.collection(VISITORS_COLLECTION).getFirstListItem(`visitorId="${visitorId}"`);
-                isNewVisitor = false;
-              } catch (refetchError) {
-                this._log("error", "Error re-fetching visitor after race condition.", refetchError);
-                return;
-              }
-            } else {
-              this._log("error", "Error creating visitor.", createError);
-              return;
-            }
-          }
-        } else {
-          this._log("error", "Error finding or creating visitor.", e);
-          return;
-        }
-      }
+      const { visitor, isNewVisitor: newVisitor } = await this._getOrCreateVisitor(visitorId);
+      isNewVisitor = newVisitor;
 
       this._log("info", `Visitor is a ${isNewVisitor ? "new visitor" : "returning visitor"}.`);
 

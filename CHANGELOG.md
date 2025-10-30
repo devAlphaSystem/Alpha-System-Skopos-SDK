@@ -1,8 +1,20 @@
+# 0.13.2
+
+#### Fixed
+
+- Fixed a race condition that could cause duplicate visitor records to be created when `identify()` is called simultaneously with tracking events for the same visitor. Implemented a promise-based locking mechanism (`_getOrCreateVisitor`) that ensures only one visitor creation happens at a time per visitorId, with concurrent requests waiting for the same promise to resolve.
+
+#### Added
+
+- New private method `_getOrCreateVisitor()` that centralizes visitor fetching/creation logic with proper concurrency control.
+
+---
+
 # 0.13.1
 
 #### Fixed
 
-- Fixed a race condition that could cause duplicate visitor records to be created when `identify()` is called simultaneously with tracking events for the same visitor. Both methods now properly handle concurrent visitor creation attempts by catching the error and re-fetching the existing record.
+- Fixed a race condition that could cause duplicate visitor records to be created when `identify()` is called simultaneously with tracking events for the same visitor. Both methods now properly handle concurrent visitor creation attempts by catching the error and re-fetching the existing record. **Had to be reworked in 0.13.2**
 
 ---
 
