@@ -21,12 +21,20 @@ function calculateBotScore(userAgent, headers) {
     score += 80;
   }
 
-  if (userAgent && /HeadlessChrome|Puppeteer|PhantomJS|Selenium|Crawl(er|bot)|Spider|Scraper|Monitor(ing)?|Archiver|Screenshot|Validator|Lighthouse|AhrefsBot|SemrushBot|MJ12bot|PetalBot|YandexBot|Bingbot|Googlebot|Baiduspider/i.test(userAgent)) {
+  if (userAgent && userAgent.length > 512) {
+    score += 40;
+  }
+
+  if (userAgent && /HeadlessChrome|Puppeteer|PhantomJS|Selenium|Playwright|Crawl(er|bot)|Spider|Scraper|Monitor(ing)?|Archiver|Screenshot|Validator|Lighthouse|AhrefsBot|SemrushBot|MJ12bot|PetalBot|YandexBot|Bingbot|Googlebot|Baiduspider|DotBot|Applebot|facebookexternalhit|Slackbot|Discordbot|Twitterbot|LinkedInBot|WhatsApp|TelegramBot/i.test(userAgent)) {
     score += 70;
   }
 
-  if (userAgent && /^curl\/|^wget\/|^python-requests\/|^Go-http-client\/|^Java\/|^okhttp\/|^Apache-HttpClient\//i.test(userAgent)) {
+  if (userAgent && /^curl\/|^wget\/|^python-requests\/|^Go-http-client\/|^Java\/|^okhttp\/|^Apache-HttpClient\/|^Axios\/|^node-fetch\/|^got\/|^Postman/i.test(userAgent)) {
     score += 60;
+  }
+
+  if (userAgent && /sqlmap|nikto|nmap|masscan|nessus|burpsuite|metasploit|nuclei|acunetix|w3af|zaproxy/i.test(userAgent)) {
+    score += 90;
   }
 
   if (userAgent && userAgent.length > 10) {
@@ -36,11 +44,20 @@ function calculateBotScore(userAgent, headers) {
     if (!uaInfo.browser.name && !uaInfo.os.name && userAgent.length > 20) {
       score += 40;
     }
+
     if (uaInfo.device.type && (uaInfo.device.type === "spider" || uaInfo.device.type === "bot")) {
       score += 50;
     }
+
     if (uaInfo.browser.name === "Other" && !uaInfo.os.name && !uaInfo.device.type) {
       score += 30;
+    }
+
+    if (uaInfo.browser.name && uaInfo.browser.version) {
+      const majorVersion = parseInt(uaInfo.browser.version.split(".")[0], 10);
+      if ((uaInfo.browser.name === "Chrome" && majorVersion < 80) || (uaInfo.browser.name === "Firefox" && majorVersion < 70) || (uaInfo.browser.name === "Safari" && majorVersion < 12) || (uaInfo.browser.name === "Edge" && majorVersion < 80)) {
+        score += 25;
+      }
     }
   }
 
@@ -53,14 +70,47 @@ function calculateBotScore(userAgent, headers) {
       }
     }
     score += missingHeadersCount * 15;
+
+    if (!headers["accept-language"]) {
+      score += 20;
+    }
+
+    const acceptHeader = headers.accept;
+    if (acceptHeader && acceptHeader !== "*/*" && !/html|xml|xhtml|json|\*\//i.test(acceptHeader)) {
+      score += 10;
+    }
+
+    if (acceptHeader === "*/*" && !headers["accept-language"]) {
+      score += 25;
+    }
+
+    const suspiciousHeaders = ["x-selenium", "x-puppeteer", "x-playwright", "x-automated", "x-webdriver"];
+    for (const header of suspiciousHeaders) {
+      if (headers[header]) {
+        score += 80;
+      }
+    }
+
+    if (headers["sec-ch-ua-platform"] && headers["sec-ch-ua-platform"].includes("Headless")) {
+      score += 60;
+    }
+
+    if (userAgent && /Chrome|Edge/i.test(userAgent) && !headers["sec-fetch-site"]) {
+      score += 15;
+    }
+
+    const connection = headers.connection;
+    if (connection && connection.toLowerCase() === "close" && headers["accept-encoding"]) {
+      score += 10;
+    }
+
+    const referer = headers.referer || headers.referrer;
+    if (referer && (/bot|crawl|spider|scrape/i.test(referer) || referer.length > 512)) {
+      score += 30;
+    }
   }
 
-  const acceptHeader = headers?.accept;
-  if (acceptHeader && acceptHeader !== "*/*" && !/html|xml|xhtml|json|\*\/ /i.test(acceptHeader)) {
-    score += 10;
-  }
-
-  return score;
+  return Math.min(score, 100);
 }
 
 /**
@@ -131,7 +181,7 @@ function generateVisitorId(siteId, ip, userAgent) {
  * @returns {import('../index').ApiEventPayload | null} The sanitized payload or null if validation fails.
  */
 function validateAndSanitizeApiPayload(payload) {
-  if (!payload || typeof payload !== "object") {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
     return null;
   }
 
@@ -140,24 +190,39 @@ function validateAndSanitizeApiPayload(payload) {
   if (typeof type !== "string" || !["pageView", "custom", "jsError"].includes(type)) {
     return null;
   }
-  if (typeof url !== "string" || url.length === 0) {
+
+  if (typeof url !== "string" || url.length === 0 || url.length > 4096) {
     return null;
   }
-  if (type === "custom" && (typeof name !== "string" || name.length === 0)) {
+
+  let urlObject;
+  try {
+    urlObject = new URL(url);
+    if (!["http:", "https:"].includes(urlObject.protocol)) {
+      return null;
+    }
+    const hostname = urlObject.hostname.toLowerCase();
+    if (hostname === "localhost" || hostname === "127.0.0.1" || hostname === "0.0.0.0" || hostname.startsWith("192.168.") || hostname.startsWith("10.") || /^172\.(1[6-9]|2\d|3[0-1])\./.test(hostname) || hostname === "::1" || hostname === "[::1]") {
+    }
+  } catch (e) {
     return null;
   }
-  if (type === "jsError" && (typeof errorMessage !== "string" || errorMessage.length === 0)) {
-    return null;
+
+  if (type === "custom") {
+    if (typeof name !== "string" || name.length === 0 || name.length > 255) {
+      return null;
+    }
+  }
+
+  if (type === "jsError") {
+    if (typeof errorMessage !== "string" || errorMessage.length === 0 || errorMessage.length > 1024) {
+      return null;
+    }
   }
 
   const sanitized = { type };
 
-  try {
-    const urlObject = new URL(url);
-    sanitized.url = urlObject.href.substring(0, 2048);
-  } catch (e) {
-    return null;
-  }
+  sanitized.url = urlObject.href.substring(0, 2048);
 
   if (type === "custom") {
     sanitized.name = name
@@ -167,31 +232,49 @@ function validateAndSanitizeApiPayload(payload) {
     if (sanitized.name.length === 0) {
       return null;
     }
+  } else if (type === "jsError") {
+    sanitized.name = "jsError";
   } else {
     sanitized.name = name;
   }
 
-  if (type === "jsError") {
-    sanitized.name = "jsError";
-  }
-
   if (referrer !== undefined) {
-    if (typeof referrer !== "string") return null;
-    sanitized.referrer = referrer.substring(0, 2048);
+    if (typeof referrer !== "string" || referrer.length > 4096) {
+      return null;
+    }
+    if (referrer.length > 0) {
+      try {
+        const refUrl = new URL(referrer);
+        if (!["http:", "https:"].includes(refUrl.protocol)) {
+          return null;
+        }
+        sanitized.referrer = refUrl.href.substring(0, 2048);
+      } catch (e) {
+        sanitized.referrer = referrer.substring(0, 2048);
+      }
+    } else {
+      sanitized.referrer = "";
+    }
   }
 
   if (screenWidth !== undefined) {
-    if (typeof screenWidth !== "number") return null;
-    sanitized.screenWidth = Math.max(0, Math.min(screenWidth, 10000));
+    if (typeof screenWidth !== "number" || !Number.isFinite(screenWidth)) {
+      return null;
+    }
+    sanitized.screenWidth = Math.max(0, Math.min(Math.floor(screenWidth), 10000));
   }
 
   if (screenHeight !== undefined) {
-    if (typeof screenHeight !== "number") return null;
-    sanitized.screenHeight = Math.max(0, Math.min(screenHeight, 10000));
+    if (typeof screenHeight !== "number" || !Number.isFinite(screenHeight)) {
+      return null;
+    }
+    sanitized.screenHeight = Math.max(0, Math.min(Math.floor(screenHeight), 10000));
   }
 
   if (language !== undefined) {
-    if (typeof language !== "string") return null;
+    if (typeof language !== "string" || language.length > 100) {
+      return null;
+    }
     sanitized.language = language
       .replace(/[\x00-\x1F\x7F-\x9F]/g, "")
       .trim()
@@ -202,25 +285,49 @@ function validateAndSanitizeApiPayload(payload) {
     if (typeof customData !== "object" || customData === null || Array.isArray(customData)) {
       return null;
     }
+
     try {
       const customDataString = JSON.stringify(customData);
       if (customDataString.length > 8192) {
         return null;
       }
-      sanitized.customData = JSON.parse(customDataString);
+
+      const parsed = JSON.parse(customDataString);
+
+      const dangerousKeys = ["__proto__", "constructor", "prototype"];
+      const hasDangerousKeys = (obj) => {
+        if (typeof obj !== "object" || obj === null) return false;
+        for (const key of Object.keys(obj)) {
+          if (dangerousKeys.includes(key.toLowerCase())) return true;
+          if (typeof obj[key] === "object" && obj[key] !== null) {
+            if (hasDangerousKeys(obj[key])) return true;
+          }
+        }
+        return false;
+      };
+
+      if (hasDangerousKeys(parsed)) {
+        return null;
+      }
+
+      sanitized.customData = parsed;
     } catch (e) {
       return null;
     }
   }
 
   if (errorMessage !== undefined) {
-    if (typeof errorMessage !== "string") return null;
-    sanitized.errorMessage = errorMessage.substring(0, 512);
+    if (typeof errorMessage !== "string" || errorMessage.length > 2048) {
+      return null;
+    }
+    sanitized.errorMessage = errorMessage.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F]/g, "").substring(0, 512);
   }
 
   if (stackTrace !== undefined) {
-    if (typeof stackTrace !== "string") return null;
-    sanitized.stackTrace = stackTrace.substring(0, 4096);
+    if (typeof stackTrace !== "string" || stackTrace.length > 16384) {
+      return null;
+    }
+    sanitized.stackTrace = stackTrace.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F]/g, "").substring(0, 4096);
   }
 
   return sanitized;

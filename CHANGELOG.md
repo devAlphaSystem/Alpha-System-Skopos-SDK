@@ -1,3 +1,17 @@
+# 0.13.0
+
+#### Added
+
+- Introduced a new `identify` method (`skopos.identify(req, userId, userData?)`) to link anonymous visitors with authenticated users. This includes a new type definitions for `IdentifyData`, and a robust implementation with extensive data validation and sanitization for user fields like name, email, phone, and metadata.
+- Added a new private method `_validateAndSanitizeIdentifyData` to ensure the integrity and security of user identification data.
+
+#### Changed
+
+- Significantly enhanced bot detection capabilities by expanding the `calculateBotScore` function. This includes new rules for detecting longer user agents, additional known bot and automated client user agents (e.g., Playwright, social media bots), security scanning tools (e.g., sqlmap, nmap), older browser versions, and suspicious header patterns (e.g., missing `accept-language`, `x-selenium` headers, 'Headless' platform indications). The bot score is now capped at 100.
+- Improved and hardened API payload validation and sanitization in `validateAndSanitizeApiPayload`. Stricter length limits were applied to `url`, event `name`, `errorMessage`, `referrer`, `language`, and `stackTrace`. URL validation now includes protocol checks, and `customData` validation includes checks for dangerous keys (e.g., `__proto__`) to prevent prototype pollution attacks.
+
+---
+
 # 0.12.2
 
 #### Changed

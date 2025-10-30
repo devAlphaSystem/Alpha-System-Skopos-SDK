@@ -123,7 +123,64 @@ app.post("/api/webhook/payment-processed", async (req, res) => {
 });
 ```
 
-### 4. Graceful Shutdown
+### 4. Identifying Users (`identify`)
+
+Use the `identify` method to associate an anonymous visitor with your internal user ID after they log in or register. This enables tracking user journeys across multiple sessions and devices.
+
+**Note:** If a visitor record doesn't exist yet, the SDK will automatically create one. This means you can call `identify()` at any time, even before the user has triggered any tracking events.
+
+**Example in a login handler:**
+
+```javascript
+app.post("/auth/login", async (req, res) => {
+  // Your authentication logic
+  const user = await authenticateUser(req.body.email, req.body.password);
+
+  if (user) {
+    // Link the anonymous visitor to this authenticated user
+    if (skopos) {
+      await skopos.identify(
+        req,
+        user.id, // Your internal user ID
+        {
+          name: user.name,
+          email: user.email,
+          phone: user.phone,
+          metadata: {
+            accountTier: user.tier,
+            signupDate: user.createdAt,
+          },
+        },
+      );
+    }
+
+    res.json({ success: true, user });
+  } else {
+    res.status(401).json({ error: "Invalid credentials" });
+  }
+});
+```
+
+**Example in a registration handler:**
+
+```javascript
+app.post("/auth/register", async (req, res) => {
+  // Create the new user
+  const newUser = await createUser(req.body);
+
+  if (skopos) {
+    // Identify the visitor as this new user
+    await skopos.identify(req, newUser.id, {
+      name: newUser.name,
+      email: newUser.email,
+    });
+  }
+
+  res.json({ success: true, user: newUser });
+});
+```
+
+### 5. Graceful Shutdown
 
 To ensure no batched data is lost when your server restarts or shuts down, add a shutdown hook. This will flush any pending events in the queue.
 
@@ -181,6 +238,24 @@ Tracks a backend-only event.
 - `eventName`: `string` - A descriptive name for the event (e.g., "user-signup-bonus-applied").
 - `customData` (optional): `Record<string, any>` - A JSON-serializable object for additional event details.
 - `siteId` (optional): `string` - Overrides the default `siteId` set during initialization.
+
+---
+
+### `skopos.identify(req, userId, [userData])`
+
+Associates an anonymous visitor with user identification data. Should be called after a user logs in or registers.
+
+- `req`: The Node.js `IncomingMessage` object.
+- `userId`: `string` - Your internal user ID (required).
+- `userData` (optional): `IdentifyData` object with the following optional fields:
+  - `name`: `string` - The user's full name (max 255 characters).
+  - `email`: `string` - The user's email address (max 255 characters, validated format).
+  - `phone`: `string` - The user's phone number (max 50 characters).
+  - `metadata`: `Record<string, any>` - Custom JSON-serializable data (max 8KB).
+
+**Returns:** A `Promise<void>` that resolves when the visitor has been identified.
+
+**Note:** If the visitor doesn't exist yet, a new visitor record will be automatically created.
 
 ---
 

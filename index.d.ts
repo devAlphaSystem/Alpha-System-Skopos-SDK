@@ -123,6 +123,37 @@ export interface ApiEventPayload {
 }
 
 /**
+ * User identification data that can be associated with a visitor.
+ * Used with the identify method to link anonymous visitors to known users.
+ */
+export interface IdentifyData {
+  /**
+   * The user's full name.
+   * @example "John Doe"
+   */
+  name?: string;
+
+  /**
+   * The user's email address.
+   * @example "john@example.com"
+   */
+  email?: string;
+
+  /**
+   * The user's phone number.
+   * @example "+1234567890"
+   */
+  phone?: string;
+
+  /**
+   * Additional custom metadata about the user.
+   * This can include any JSON-serializable data like account tier, preferences, etc.
+   * @example { accountTier: "premium", signupSource: "google" }
+   */
+  metadata?: Record<string, any>;
+}
+
+/**
  * The main Skopos SDK class for server-side event tracking.
  * Do not instantiate directly; use the static `init` method instead.
  */
@@ -158,6 +189,19 @@ declare class SkoposSDK {
    * @param {string} [siteId] - Optional site ID to override the one set during initialization.
    */
   trackServerEvent(req: IncomingMessage, eventName: string, customData?: Record<string, any>, siteId?: string): void;
+
+  /**
+   * Associates an anonymous visitor with user identification data.
+   * Should be called after a user logs in or registers to link their session to your internal user ID.
+   * This enables tracking user journeys across multiple sessions and devices.
+   * @param {IncomingMessage} req - The incoming HTTP request object.
+   * @param {string} userId - Your internal user ID (e.g., from your database).
+   * @param {IdentifyData} [userData] - Optional user data (name, email, phone, metadata).
+   * @returns {Promise<void>}
+   * @example
+   * await skopos.identify(req, 'user_123', { name: 'John Doe', email: 'john@example.com' });
+   */
+  identify(req: IncomingMessage, userId: string, userData?: IdentifyData): Promise<void>;
 
   /**
    * Manually sends all events currently in the queue.

@@ -281,6 +281,134 @@ class SkoposSDK {
   }
 
   /**
+   * Associates an anonymous visitor with user identification data.
+   * Should be called after a user logs in or registers to link their session to your internal user ID.
+   * This enables tracking user journeys across multiple sessions and devices.
+   * @param {import('http').IncomingMessage} req The incoming HTTP request object.
+   * @param {string} userId Your internal user ID (e.g., from your database).
+   * @param {import('./index').IdentifyData} [userData={}] Optional user data (name, email, phone, metadata).
+   * @returns {Promise<void>}
+   * @example
+   * await skopos.identify(req, 'user_123', { name: 'John Doe', email: 'john@example.com' });
+   */
+  async identify(req, userId, userData = {}) {
+    this._log("debug", `identify called for userId: ${userId}`);
+
+    if (!userId || typeof userId !== "string") {
+      this._log("error", "identify requires a valid userId string.");
+      return;
+    }
+
+    const sanitizedUserId = userId.trim().substring(0, 255);
+    if (sanitizedUserId.length === 0) {
+      this._log("error", "identify userId cannot be empty.");
+      return;
+    }
+
+    const sanitizedData = this._validateAndSanitizeIdentifyData(userData);
+    if (!sanitizedData) {
+      this._log("error", "identify userData validation failed.");
+      return;
+    }
+
+    const { ip, userAgent } = extractRequestData(req);
+    const visitorId = generateVisitorId(this.siteId, ip, userAgent);
+
+    try {
+      await this._ensureAdminAuth();
+
+      let visitor;
+      try {
+        visitor = await this.pb.collection(VISITORS_COLLECTION).getFirstListItem(`visitorId="${visitorId}"`);
+        this._log("debug", `Found existing visitor ${visitorId}`);
+      } catch (error) {
+        if (error.status === 404) {
+          this._log("info", `No visitor found with visitorId: ${visitorId}. Creating new visitor.`);
+          visitor = await this.pb.collection(VISITORS_COLLECTION).create({
+            website: this.websiteRecordId,
+            visitorId,
+          });
+          this._log("debug", `Created new visitor: ${visitor.id}`);
+        } else {
+          throw error;
+        }
+      }
+
+      const updateData = {
+        userId: sanitizedUserId,
+      };
+
+      if (sanitizedData.name) updateData.name = sanitizedData.name;
+      if (sanitizedData.email) updateData.email = sanitizedData.email;
+      if (sanitizedData.phone) updateData.phone = sanitizedData.phone;
+      if (sanitizedData.metadata && Object.keys(sanitizedData.metadata).length > 0) {
+        updateData.metadata = sanitizedData.metadata;
+      }
+
+      await this.pb.collection(VISITORS_COLLECTION).update(visitor.id, updateData);
+      this._log("info", `Successfully identified visitor ${visitorId} as user ${sanitizedUserId}`);
+    } catch (error) {
+      this._log("error", "Failed to identify visitor.", error);
+    }
+  }
+
+  /**
+   * Validates and sanitizes user identification data.
+   * @private
+   * @param {import('./index').IdentifyData} data The raw user data.
+   * @returns {import('./index').IdentifyData | null} The sanitized data or null if validation fails.
+   */
+  _validateAndSanitizeIdentifyData(data) {
+    if (!data || typeof data !== "object") {
+      return {};
+    }
+
+    const sanitized = {};
+
+    if (data.name !== undefined) {
+      if (typeof data.name !== "string") return null;
+      sanitized.name = data.name
+        .replace(/[\x00-\x1F\x7F-\x9F]/g, "")
+        .trim()
+        .substring(0, 255);
+    }
+
+    if (data.email !== undefined) {
+      if (typeof data.email !== "string") return null;
+      const email = data.email.trim().toLowerCase().substring(0, 255);
+      if (email.length > 0 && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+        return null;
+      }
+      sanitized.email = email;
+    }
+
+    if (data.phone !== undefined) {
+      if (typeof data.phone !== "string") return null;
+      sanitized.phone = data.phone
+        .replace(/[\x00-\x1F\x7F-\x9F]/g, "")
+        .trim()
+        .substring(0, 50);
+    }
+
+    if (data.metadata !== undefined) {
+      if (typeof data.metadata !== "object" || data.metadata === null || Array.isArray(data.metadata)) {
+        return null;
+      }
+      try {
+        const metadataString = JSON.stringify(data.metadata);
+        if (metadataString.length > 8192) {
+          return null;
+        }
+        sanitized.metadata = JSON.parse(metadataString);
+      } catch (e) {
+        return null;
+      }
+    }
+
+    return sanitized;
+  }
+
+  /**
    * Gracefully shuts down the SDK by clearing timers and flushing any remaining events.
    * Must be called before process exit to avoid data loss.
    * @returns {Promise<void>}
