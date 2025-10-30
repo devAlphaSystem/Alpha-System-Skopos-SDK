@@ -1,3 +1,11 @@
+# 0.13.1
+
+#### Fixed
+
+- Fixed a race condition that could cause duplicate visitor records to be created when `identify()` is called simultaneously with tracking events for the same visitor. Both methods now properly handle concurrent visitor creation attempts by catching the error and re-fetching the existing record.
+
+---
+
 # 0.13.0
 
 #### Added

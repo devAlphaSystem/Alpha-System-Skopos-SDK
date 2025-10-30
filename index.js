@@ -324,11 +324,20 @@ class SkoposSDK {
       } catch (error) {
         if (error.status === 404) {
           this._log("info", `No visitor found with visitorId: ${visitorId}. Creating new visitor.`);
-          visitor = await this.pb.collection(VISITORS_COLLECTION).create({
-            website: this.websiteRecordId,
-            visitorId,
-          });
-          this._log("debug", `Created new visitor: ${visitor.id}`);
+          try {
+            visitor = await this.pb.collection(VISITORS_COLLECTION).create({
+              website: this.websiteRecordId,
+              visitorId,
+            });
+            this._log("debug", `Created new visitor: ${visitor.id}`);
+          } catch (createError) {
+            if (createError.status === 400) {
+              this._log("warn", "Race condition detected on visitor creation, re-fetching.");
+              visitor = await this.pb.collection(VISITORS_COLLECTION).getFirstListItem(`visitorId="${visitorId}"`);
+            } else {
+              throw createError;
+            }
+          }
         } else {
           throw error;
         }
@@ -853,8 +862,24 @@ class SkoposSDK {
         isNewVisitor = false;
       } catch (e) {
         if (e.status === 404) {
-          visitor = await this.pb.collection(VISITORS_COLLECTION).create({ website: this.websiteRecordId, visitorId });
-          isNewVisitor = true;
+          try {
+            visitor = await this.pb.collection(VISITORS_COLLECTION).create({ website: this.websiteRecordId, visitorId });
+            isNewVisitor = true;
+          } catch (createError) {
+            if (createError.status === 400) {
+              this._log("warn", "Race condition detected on visitor creation, re-fetching.");
+              try {
+                visitor = await this.pb.collection(VISITORS_COLLECTION).getFirstListItem(`visitorId="${visitorId}"`);
+                isNewVisitor = false;
+              } catch (refetchError) {
+                this._log("error", "Error re-fetching visitor after race condition.", refetchError);
+                return;
+              }
+            } else {
+              this._log("error", "Error creating visitor.", createError);
+              return;
+            }
+          }
         } else {
           this._log("error", "Error finding or creating visitor.", e);
           return;
