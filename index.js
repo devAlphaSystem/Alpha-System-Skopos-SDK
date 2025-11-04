@@ -6,6 +6,7 @@ const geoip = require("geoip-lite");
 const ipaddr = require("ipaddr.js");
 const { createHash } = require("node:crypto");
 const { detectBot, parseUserAgent, extractRequestData, generateVisitorId, validateAndSanitizeApiPayload, getSanitizedDomain } = require("./modules/utils");
+const packageInfo = require("./package.json");
 
 const VISITORS_COLLECTION = "visitors";
 const SESSIONS_COLLECTION = "sessions";
@@ -49,6 +50,7 @@ class SkoposSDK {
     this.disableLocalhostTracking = false;
     this.isArchived = false;
     this.ipBlacklist = [];
+    this.storeRawIp = false;
     this.sessionTimeout = options.sessionTimeoutMs ?? DEFAULT_SESSION_TIMEOUT_MS;
     this.sessionCache = new Map();
     this.visitorCreationLocks = new Map();
@@ -147,7 +149,17 @@ class SkoposSDK {
       sdk.disableLocalhostTracking = websiteRecord.disableLocalhostTracking;
       sdk.isArchived = websiteRecord.isArchived || false;
       sdk.ipBlacklist = websiteRecord.ipBlacklist || [];
+      sdk.storeRawIp = websiteRecord.storeRawIp || false;
       sdk._log("info", `Successfully loaded configuration for website: ${sdk.domain || sdk.websiteRecordId}`);
+
+      try {
+        await sdk.pb.collection("websites").update(sdk.websiteRecordId, {
+          sdkVersion: packageInfo.version,
+        });
+        sdk._log("info", `Updated SDK version to ${packageInfo.version}`);
+      } catch (versionError) {
+        sdk._log("warn", "Failed to update SDK version in database", versionError);
+      }
     } catch (error) {
       if (error.status === 404) {
         throw new Error(`SkoposSDK: Website with trackingId "${options.siteId}" not found.`);
@@ -166,6 +178,7 @@ class SkoposSDK {
           sdk.disableLocalhostTracking = e.record.disableLocalhostTracking;
           sdk.ipBlacklist = e.record.ipBlacklist || [];
           sdk.isArchived = e.record.isArchived || false;
+          sdk.storeRawIp = e.record.storeRawIp || false;
         }
       });
       sdk._log("info", "Successfully subscribed to configuration changes.");
@@ -915,6 +928,10 @@ class SkoposSDK {
         country,
         isNewVisitor,
       };
+
+      if (this.storeRawIp && ip) {
+        sessionData.ipAddress = ip;
+      }
 
       try {
         const newSession = await this.pb.collection(SESSIONS_COLLECTION).create(sessionData);

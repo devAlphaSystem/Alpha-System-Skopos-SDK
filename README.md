@@ -72,6 +72,14 @@ startServer();
 
 This is the **designated method** for handling all user-driven activity. Create an API endpoint that receives data from the `skopos.js` client script and passes it to this method.
 
+**Note on Dashboard Features:**
+- **SEO Analysis**: Automatic SEO scans are triggered when you add a website, plus weekly scans every Tuesday at 3:00 AM UTC
+- **SDK Version Tracking**: The dashboard now displays your SDK version on each website card (v0.28.0+)
+- **IP Storage Control**: Version 0.28.0 adds optional IP address storage (disabled by default for privacy)
+  - When enabled in Settings → Privacy & Data Collection, full IP addresses are stored
+  - When disabled, only hashed visitor IDs are stored
+  - The SDK automatically adapts based on your dashboard settings
+
 **Example using Express.js:**
 
 ```javascript
