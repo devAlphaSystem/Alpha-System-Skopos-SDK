@@ -198,13 +198,7 @@ process.on("SIGINT", gracefulShutdown);
 process.on("SIGTERM", gracefulShutdown);
 ```
 
-## API Reference
-
-### `SkoposSDK.init(options)`
-
-Initializes the SDK. This is a static, async method that returns a promise resolving to an SDK instance.
-
-- `options`: `SkoposSDKOptions` object.
+## Configuration Options
 
 | Option                    | Type      | Required | Description                                                                              | Default   |
 | :------------------------ | :-------- | :------- | :--------------------------------------------------------------------------------------- | :-------- |
@@ -212,12 +206,25 @@ Initializes the SDK. This is a static, async method that returns a promise resol
 | `pocketbaseUrl`           | `string`  | **Yes**  | The full URL to your PocketBase instance (e.g., `http://127.0.0.1:8090`).                |           |
 | `adminEmail`              | `string`  | **Yes**  | The email for a PocketBase admin or superuser account.                                   |           |
 | `adminPassword`           | `string`  | **Yes**  | The password for the PocketBase admin account.                                           |           |
-| `batch`                   | `boolean` | No       | Set to `true` to enable event batching for improved performance.                         | `false`   |
+| `batch`                   | `boolean` | No       | Set to `true` to enable event batching for improved performance. Recommended for production. | `false`   |
 | `batchInterval`           | `number`  | No       | The interval in milliseconds to send batched events.                                     | `10000`   |
 | `maxBatchSize`            | `number`  | No       | The maximum number of events to queue before flushing.                                   | `100`     |
 | `sessionTimeoutMs`        | `number`  | No       | Duration in milliseconds before a visitor's session is considered expired.               | `1800000` |
 | `jsErrorBatchInterval`    | `number`  | No       | Interval in milliseconds to send batched JavaScript error reports.                       | `300000`  |
-| `configRefreshIntervalMs` | `number`  | No       | Interval in milliseconds to automatically refresh website settings.                      | `900000`  |
+| `debug`                   | `boolean` | No       | Set to `true` to enable verbose debug logging. Useful for troubleshooting.              | `false`   |
+
+## API Reference
+
+### `SkoposSDK.init(options)`
+
+Initializes the SDK. This is a static, async method that returns a promise resolving to an SDK instance.
+
+**Parameters:**
+- `options`: `SkoposSDKOptions` object (see Configuration Options above).
+
+**Returns:** `Promise<SkoposSDK>`
+
+**Throws:** Error if authentication fails or website not found.
 
 ---
 
@@ -225,26 +232,35 @@ Initializes the SDK. This is a static, async method that returns a promise resol
 
 Processes a rich data payload from the `skopos.js` client script. This is the main method for tracking user activity.
 
+**Parameters:**
 - `req`: The Node.js `IncomingMessage` object from your server framework.
 - `payload`: An `ApiEventPayload` object, typically from `req.body`.
+
+**Returns:** `void` (fire-and-forget, processes in background)
+
+**Note:** This method validates domain, filters bots, checks IP blacklist, and enforces localhost tracking settings automatically.
 
 ---
 
 ### `skopos.trackServerEvent(req, eventName, [customData], [siteId])`
 
-Tracks a backend-only event.
+Tracks a backend-only event (e.g., webhooks, cron jobs, API calls).
 
+**Parameters:**
 - `req`: The Node.js `IncomingMessage` object.
-- `eventName`: `string` - A descriptive name for the event (e.g., "user-signup-bonus-applied").
+- `eventName`: `string` - A descriptive name for the event (e.g., "payment_completed").
 - `customData` (optional): `Record<string, any>` - A JSON-serializable object for additional event details.
 - `siteId` (optional): `string` - Overrides the default `siteId` set during initialization.
+
+**Returns:** `void` (fire-and-forget, processes in background)
 
 ---
 
 ### `skopos.identify(req, userId, [userData])`
 
-Associates an anonymous visitor with user identification data. Should be called after a user logs in or registers.
+Associates an anonymous visitor with user identification data. Should be called after a user logs in or registers to enable cross-session and cross-device tracking.
 
+**Parameters:**
 - `req`: The Node.js `IncomingMessage` object.
 - `userId`: `string` - Your internal user ID (required).
 - `userData` (optional): `IdentifyData` object with the following optional fields:
@@ -253,12 +269,135 @@ Associates an anonymous visitor with user identification data. Should be called 
   - `phone`: `string` - The user's phone number (max 50 characters).
   - `metadata`: `Record<string, any>` - Custom JSON-serializable data (max 8KB).
 
-**Returns:** A `Promise<void>` that resolves when the visitor has been identified.
+**Returns:** `Promise<void>` - Resolves when the visitor has been identified.
 
 **Note:** If the visitor doesn't exist yet, a new visitor record will be automatically created.
 
 ---
 
+### `skopos.flushEvents()`
+
+Manually flushes any queued events to the database. Normally called automatically by the batch interval, but can be called manually if needed.
+
+**Returns:** `Promise<void>`
+
+---
+
 ### `skopos.shutdown()`
 
-Flushes any batched events and clears all interval timers. Returns a `Promise` that resolves when the flush is complete.
+Gracefully shuts down the SDK by clearing all timers and flushing any remaining events. **Must be called before process exit** to prevent data loss.
+
+**Returns:** `Promise<void>`
+
+## Best Practices
+
+### 1. Use Environment Variables
+
+Never hardcode credentials in your source code:
+
+```javascript
+// .env file
+POCKETBASE_URL=https://pb.example.com
+SKOPOS_SITE_ID=abc123xyz
+POCKETBASE_ADMIN_EMAIL=admin@example.com
+POCKETBASE_ADMIN_PASSWORD=your-secure-password
+
+// In your code
+import dotenv from "dotenv";
+dotenv.config();
+
+const skopos = await SkoposSDK.init({
+  siteId: process.env.SKOPOS_SITE_ID,
+  pocketbaseUrl: process.env.POCKETBASE_URL,
+  adminEmail: process.env.POCKETBASE_ADMIN_EMAIL,
+  adminPassword: process.env.POCKETBASE_ADMIN_PASSWORD,
+});
+```
+
+### 2. Enable Batching in Production
+
+Batching significantly reduces database load and improves performance:
+
+```javascript
+const skopos = await SkoposSDK.init({
+  // ... other options
+  batch: true,
+  batchInterval: 10000, // 10 seconds
+  maxBatchSize: 100,
+});
+```
+
+### 3. Don't Block Responses
+
+Never await `trackApiEvent` or `trackServerEvent` (they're fire-and-forget). Only await `identify()`:
+
+```javascript
+// ❌ Bad: Blocks the response
+app.post("/api/event", async (req, res) => {
+  await skopos.trackApiEvent(req, req.body); // Don't do this!
+  res.status(204).send();
+});
+
+// ✅ Good: Fire and forget
+app.post("/api/event", (req, res) => {
+  skopos.trackApiEvent(req, req.body);
+  res.status(204).send();
+});
+
+// ✅ Also good: identify() should be awaited
+app.post("/auth/login", async (req, res) => {
+  const user = await authenticateUser(req.body);
+  await skopos.identify(req, user.id, { name: user.name });
+  res.json({ success: true });
+});
+```
+
+### 4. Implement Graceful Shutdown
+
+Always flush events before your process exits:
+
+```javascript
+async function gracefulShutdown() {
+  console.log("Shutting down gracefully...");
+  if (skopos) {
+    await skopos.shutdown();
+  }
+  process.exit(0);
+}
+
+process.on("SIGINT", gracefulShutdown);
+process.on("SIGTERM", gracefulShutdown);
+```
+
+## Troubleshooting
+
+### Events Not Appearing
+
+1. ✅ Verify the SDK is initialized with the correct `siteId`
+2. ✅ Check that your website domain matches the origin of incoming requests
+3. ✅ Ensure the client-side script has the correct `data-endpoint`
+4. ✅ Look for validation errors in your server logs (enable `debug: true`)
+5. ✅ Check if the IP is in the blacklist or localhost tracking is disabled
+
+### High Memory Usage
+
+- Reduce `maxBatchSize` (e.g., to 50)
+- Decrease `batchInterval` to flush more frequently
+- Reduce `sessionTimeoutMs` if you have high traffic
+
+### Authentication Errors
+
+- Verify admin credentials are still valid
+- Check PocketBase is accessible from your server
+- Ensure admin account hasn't been disabled
+
+## Documentation
+
+For complete documentation, see:
+- [SDK Documentation](https://docs.alphasystem.dev/view/xfdb25r821hx04d)
+- [Client-Side Script Guide](https://docs.alphasystem.dev/view/cfbuhl4n4j4h0xj)
+- [Dashboard Guide](https://docs.alphasystem.dev/view/kgq24zxepony7w2)
+
+## License
+
+MIT

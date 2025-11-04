@@ -849,34 +849,44 @@ class SkoposSDK {
     const now = Date.now();
     let sessionId;
     const cachedSession = this.sessionCache.get(visitorId);
+    let activeSession = null;
     let isNewSession = false;
     let isNewVisitor = false;
     let isEngaged = false;
 
     if (cachedSession && now - cachedSession.lastActivity < this.sessionTimeout) {
-      cachedSession.lastActivity = now;
-      cachedSession.lastPath = path;
-      sessionId = cachedSession.sessionId;
-      cachedSession.eventCount++;
+      let sessionStillValid = true;
 
-      if (!cachedSession.isEngaged && (cachedSession.eventCount >= 2 || (customData?.duration && customData.duration > 10))) {
-        cachedSession.isEngaged = true;
-        isEngaged = true;
+      try {
+        await this.pb.collection(SESSIONS_COLLECTION).update(cachedSession.sessionId, {});
+      } catch (err) {
+        if (err.status === 404) {
+          this._log("warn", `Session ${cachedSession.sessionId} not found in DB, removing from cache and will create a new one.`);
+          this.sessionCache.delete(visitorId);
+          sessionStillValid = false;
+        } else {
+          this._log("error", `Failed to update session for ${cachedSession.sessionId}.`, err.message);
+          sessionStillValid = false;
+        }
       }
 
-      this._log("debug", `Existing session found for visitor ${visitorId}: ${sessionId}`);
+      if (sessionStillValid) {
+        sessionId = cachedSession.sessionId;
+        cachedSession.lastActivity = now;
+        cachedSession.lastPath = path;
+        cachedSession.eventCount++;
 
-      this.pb
-        .collection(SESSIONS_COLLECTION)
-        .update(sessionId, {})
-        .catch((err) => {
-          if (err.status === 404) {
-            this._log("warn", `Session ${sessionId} not found in DB, removing from cache.`);
-            this.sessionCache.delete(visitorId);
-          }
-          this._log("error", `Failed to update session for ${sessionId}.`, err.message);
-        });
-    } else {
+        if (!cachedSession.isEngaged && (cachedSession.eventCount >= 2 || (customData?.duration && customData.duration > 10))) {
+          cachedSession.isEngaged = true;
+          isEngaged = true;
+        }
+
+        activeSession = cachedSession;
+        this._log("debug", `Existing session found for visitor ${visitorId}: ${sessionId}`);
+      }
+    }
+
+    if (!activeSession) {
       isNewSession = true;
       this._log("info", `No active session found for visitor ${visitorId}. Creating a new one.`);
       if (cachedSession) {
@@ -924,9 +934,7 @@ class SkoposSDK {
         this._log("error", "Error creating session.", e);
         return;
       }
-    }
-
-    if (!isNewSession) {
+    } else {
       this._updateDashboardSummary({ ...data, country, isNewSession, isNewVisitor, isEngaged });
     }
 
