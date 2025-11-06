@@ -850,13 +850,17 @@ class SkoposSDK {
     await this._ensureAdminAuth();
 
     let country = "Unknown";
+    let state = "Unknown";
     if (ip) {
       const geo = geoip.lookup(ip);
       if (geo?.country) {
         country = geo.country;
       }
+      if (geo?.region) {
+        state = geo.region;
+      }
     }
-    this._log("debug", `GeoIP lookup for ${ip}: ${country}`);
+    this._log("debug", `GeoIP lookup for ${ip}: ${country}, ${state}`);
 
     const visitorId = generateVisitorId(siteId, ip, userAgent);
     const now = Date.now();
@@ -926,6 +930,7 @@ class SkoposSDK {
         screenHeight,
         language,
         country,
+        state,
         isNewVisitor,
       };
 
@@ -946,13 +951,13 @@ class SkoposSDK {
 
         this.sessionCache.set(visitorId, { sessionId, lastActivity: now, eventCount: 1, lastPath: path, isEngaged: sessionIsEngaged });
 
-        this._updateDashboardSummary({ ...data, ...uaDetails, country, isNewSession, isNewVisitor, isEngaged });
+        this._updateDashboardSummary({ ...data, ...uaDetails, country, state, isNewSession, isNewVisitor, isEngaged });
       } catch (e) {
         this._log("error", "Error creating session.", e);
         return;
       }
     } else {
-      this._updateDashboardSummary({ ...data, country, isNewSession, isNewVisitor, isEngaged });
+      this._updateDashboardSummary({ ...data, country, state, isNewSession, isNewVisitor, isEngaged });
     }
 
     if (type === "jsError") {

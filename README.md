@@ -2,6 +2,7 @@
 
 [![NPM Version](https://img.shields.io/npm/v/@alphasystem/skopos.svg)](https://www.npmjs.com/package/@alphasystem/skopos)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Node Version](https://img.shields.io/badge/node-%3E%3D18.0.0-brightgreen.svg)](https://nodejs.org/)
 
 The official server-side NodeJS SDK for Skopos, the open-source, privacy-first, self-hosted website analytics platform.
 
@@ -71,14 +72,6 @@ startServer();
 ### 2. Tracking Client-Side Activity (`trackApiEvent`)
 
 This is the **designated method** for handling all user-driven activity. Create an API endpoint that receives data from the `skopos.js` client script and passes it to this method.
-
-**Note on Dashboard Features:**
-- **SEO Analysis**: Automatic SEO scans are triggered when you add a website, plus weekly scans every Tuesday at 3:00 AM UTC
-- **SDK Version Tracking**: The dashboard now displays your SDK version on each website card (v0.28.0+)
-- **IP Storage Control**: Version 0.28.0 adds optional IP address storage (disabled by default for privacy)
-  - When enabled in Settings → Privacy & Data Collection, full IP addresses are stored
-  - When disabled, only hashed visitor IDs are stored
-  - The SDK automatically adapts based on your dashboard settings
 
 **Example using Express.js:**
 
@@ -405,6 +398,11 @@ For complete documentation, see:
 - [SDK Documentation](https://docs.alphasystem.dev/view/xfdb25r821hx04d)
 - [Client-Side Script Guide](https://docs.alphasystem.dev/view/cfbuhl4n4j4h0xj)
 - [Dashboard Guide](https://docs.alphasystem.dev/view/kgq24zxepony7w2)
+
+## Requirements
+
+- **Node.js**: 18.x or higher
+- **PocketBase**: 0.20.0 or higher
 
 ## License
 
