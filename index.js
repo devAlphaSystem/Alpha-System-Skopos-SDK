@@ -51,6 +51,7 @@ class SkoposSDK {
     this.isArchived = false;
     this.ipBlacklist = [];
     this.storeRawIp = false;
+    this.discardShortSessions = false;
     this.sessionTimeout = options.sessionTimeoutMs ?? DEFAULT_SESSION_TIMEOUT_MS;
     this.sessionCache = new Map();
     this.visitorCreationLocks = new Map();
@@ -150,7 +151,9 @@ class SkoposSDK {
       sdk.isArchived = websiteRecord.isArchived || false;
       sdk.ipBlacklist = websiteRecord.ipBlacklist || [];
       sdk.storeRawIp = websiteRecord.storeRawIp || false;
+      sdk.discardShortSessions = websiteRecord.discardShortSessions || false;
       sdk._log("info", `Successfully loaded configuration for website: ${sdk.domain || sdk.websiteRecordId}`);
+      sdk._log("info", `Discard short sessions: ${sdk.discardShortSessions}`);
 
       try {
         await sdk.pb.collection("websites").update(sdk.websiteRecordId, {
@@ -179,6 +182,8 @@ class SkoposSDK {
           sdk.ipBlacklist = e.record.ipBlacklist || [];
           sdk.isArchived = e.record.isArchived || false;
           sdk.storeRawIp = e.record.storeRawIp || false;
+          sdk.discardShortSessions = e.record.discardShortSessions || false;
+          sdk._log("info", `Discard short sessions updated: ${sdk.discardShortSessions}`);
         }
       });
       sdk._log("info", "Successfully subscribed to configuration changes.");
@@ -261,11 +266,11 @@ class SkoposSDK {
    * Tracks a server-side event (for example, an API or backend event).
    * @param {import('http').IncomingMessage} req The incoming HTTP request object.
    * @param {string} eventName A descriptive name for the server-side event (e.g., "user_signup").
-   * @param {Record<string, any>} [customData={}] Optional additional custom event data.
    * @param {string} [siteId] Optional site ID; overrides the default if provided.
+   * @param {Record<string, any>} [customData={}] Optional additional custom event data.
    * @returns {Promise<void>|void}
    */
-  trackServerEvent(req, eventName, customData = {}, siteId) {
+  trackServerEvent(req, eventName, siteId, customData = {}) {
     this._log("debug", `trackServerEvent called for event: "${eventName}"`);
     const siteToTrack = siteId || this.siteId;
     if (!siteToTrack) {
@@ -735,17 +740,18 @@ class SkoposSDK {
     this.jsErrorQueue.clear();
 
     for (const [hash, errorData] of errorsToFlush.entries()) {
+      const filter = `errorHash="${hash}" && website="${this.websiteRecordId}"`;
       try {
-        const existingError = await this.pb.collection(ERRORS_COLLECTION).getFirstListItem(`errorHash="${hash}"`);
+        const existingError = await this.pb.collection(ERRORS_COLLECTION).getFirstListItem(filter);
         await this.pb.collection(ERRORS_COLLECTION).update(existingError.id, {
           "count+": errorData.count,
           lastSeen: new Date().toISOString(),
         });
-        this._log("debug", `Updated JS error: ${hash}`);
+        this._log("debug", `Updated JS error: ${hash} for website ${this.websiteRecordId}`);
       } catch (error) {
         if (error.status === 404) {
           try {
-            this._log("debug", `Creating new JS error: ${hash}`);
+            this._log("debug", `Creating new JS error: ${hash} for website ${this.websiteRecordId}`);
             await this.pb.collection(ERRORS_COLLECTION).create({
               website: this.websiteRecordId,
               session: errorData.sessionId,
@@ -774,17 +780,36 @@ class SkoposSDK {
     this._log("debug", "Running session cache cleanup...");
     const now = Date.now();
     let cleanedCount = 0;
+    let discardedCount = 0;
     for (const [visitorId, sessionData] of this.sessionCache.entries()) {
       if (now - sessionData.lastActivity > this.sessionTimeout) {
-        this._log("debug", `Expiring session for visitorId: ${visitorId}`);
-        const lastActivityDate = new Date(sessionData.lastActivity);
-        this._updateDashboardSummary({ expiredSessionPath: sessionData.lastPath }, lastActivityDate);
-        this.sessionCache.delete(visitorId);
-        cleanedCount++;
+        const sessionDuration = sessionData.lastActivity - sessionData.startTime;
+        const sessionDurationSeconds = sessionDuration / 1000;
+
+        if (this.discardShortSessions && sessionDurationSeconds < 1) {
+          this._log("debug", `Discarding short session for visitorId: ${visitorId} (duration: ${sessionDurationSeconds.toFixed(3)}s)`);
+          this.pb
+            .collection(SESSIONS_COLLECTION)
+            .delete(sessionData.sessionId)
+            .catch((err) => {
+              this._log("warn", `Failed to delete short session ${sessionData.sessionId}: ${err.message}`);
+            });
+          this.sessionCache.delete(visitorId);
+          discardedCount++;
+        } else {
+          this._log("debug", `Expiring session for visitorId: ${visitorId}`);
+          const lastActivityDate = new Date(sessionData.lastActivity);
+          this._updateDashboardSummary({ expiredSessionPath: sessionData.lastPath }, lastActivityDate);
+          this.sessionCache.delete(visitorId);
+          cleanedCount++;
+        }
       }
     }
     if (cleanedCount > 0) {
       this._log("info", `Cleaned ${cleanedCount} expired sessions from cache.`);
+    }
+    if (discardedCount > 0) {
+      this._log("info", `Discarded ${discardedCount} short sessions (<1s).`);
     }
   }
 
@@ -949,7 +974,7 @@ class SkoposSDK {
           sessionIsEngaged = true;
         }
 
-        this.sessionCache.set(visitorId, { sessionId, lastActivity: now, eventCount: 1, lastPath: path, isEngaged: sessionIsEngaged });
+        this.sessionCache.set(visitorId, { sessionId, lastActivity: now, startTime: now, eventCount: 1, lastPath: path, isEngaged: sessionIsEngaged });
 
         this._updateDashboardSummary({ ...data, ...uaDetails, country, state, isNewSession, isNewVisitor, isEngaged });
       } catch (e) {
