@@ -788,9 +788,8 @@ class SkoposSDK {
 
         if (this.discardShortSessions && sessionDurationSeconds < 1) {
           this._log("debug", `Discarding short session for visitorId: ${visitorId} (duration: ${sessionDurationSeconds.toFixed(3)}s)`);
-          this.pb
-            .collection(SESSIONS_COLLECTION)
-            .delete(sessionData.sessionId)
+          this._ensureAdminAuth()
+            .then(() => this.pb.collection(SESSIONS_COLLECTION).delete(sessionData.sessionId))
             .catch((err) => {
               this._log("warn", `Failed to delete short session ${sessionData.sessionId}: ${err.message}`);
             });
@@ -923,6 +922,15 @@ class SkoposSDK {
           isEngaged = true;
         }
 
+        if (this.discardShortSessions && !cachedSession.summaryUpdated) {
+          const sessionDuration = now - cachedSession.startTime;
+          const sessionDurationSeconds = sessionDuration / 1000;
+          if (sessionDurationSeconds >= 1 || cachedSession.eventCount >= 2) {
+            isNewSession = true;
+            isNewVisitor = cachedSession.isNewVisitor || false;
+          }
+        }
+
         activeSession = cachedSession;
         this._log("debug", `Existing session found for visitor ${visitorId}: ${sessionId}`);
       }
@@ -974,15 +982,51 @@ class SkoposSDK {
           sessionIsEngaged = true;
         }
 
-        this.sessionCache.set(visitorId, { sessionId, lastActivity: now, startTime: now, eventCount: 1, lastPath: path, isEngaged: sessionIsEngaged });
+        this.sessionCache.set(visitorId, {
+          sessionId,
+          lastActivity: now,
+          startTime: now,
+          eventCount: 1,
+          lastPath: path,
+          isEngaged: sessionIsEngaged,
+          summaryUpdated: false,
+          isNewVisitor,
+          uaDetails,
+          country,
+          state,
+        });
 
-        this._updateDashboardSummary({ ...data, ...uaDetails, country, state, isNewSession, isNewVisitor, isEngaged });
+        if (!this.discardShortSessions) {
+          this._updateDashboardSummary({ ...data, ...uaDetails, country, state, isNewSession, isNewVisitor, isEngaged });
+          this.sessionCache.get(visitorId).summaryUpdated = true;
+        }
       } catch (e) {
         this._log("error", "Error creating session.", e);
         return;
       }
     } else {
-      this._updateDashboardSummary({ ...data, country, state, isNewSession, isNewVisitor, isEngaged });
+      if (this.discardShortSessions && !cachedSession.summaryUpdated) {
+        const sessionDuration = now - cachedSession.startTime;
+        const sessionDurationSeconds = sessionDuration / 1000;
+        if (sessionDurationSeconds >= 1 || cachedSession.eventCount >= 2) {
+          const summaryData = {
+            ...data,
+            browser: cachedSession.uaDetails?.browser,
+            os: cachedSession.uaDetails?.os,
+            device: cachedSession.uaDetails?.device,
+            country: cachedSession.country,
+            state: cachedSession.state,
+            isNewSession: true,
+            isNewVisitor: cachedSession.isNewVisitor || false,
+            isEngaged: cachedSession.isEngaged || false,
+          };
+          this._updateDashboardSummary(summaryData);
+          cachedSession.summaryUpdated = true;
+          this._log("debug", `Session ${sessionId} has proven to be real (${sessionDurationSeconds.toFixed(3)}s, ${cachedSession.eventCount} events), updating summary.`);
+        }
+      } else if (!this.discardShortSessions) {
+        this._updateDashboardSummary({ ...data, country, state, isNewSession, isNewVisitor, isEngaged });
+      }
     }
 
     if (type === "jsError") {
