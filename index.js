@@ -11,14 +11,12 @@ const packageInfo = require("./package.json");
 const VISITORS_COLLECTION = "visitors";
 const SESSIONS_COLLECTION = "sessions";
 const EVENTS_COLLECTION = "events";
-const SUMMARIES_COLLECTION = "dash_sum";
 const ERRORS_COLLECTION = "js_errors";
 
 const DEFAULT_BATCH_INTERVAL_MS = 10000;
 const DEFAULT_MAX_BATCH_SIZE = 100;
 const DEFAULT_SESSION_TIMEOUT_MS = 1000 * 60 * 30;
 const DEFAULT_ERROR_BATCH_INTERVAL_MS = 1000 * 60 * 5;
-const SUMMARY_FLUSH_INTERVAL_MS = 5000;
 const SESSION_CACHE_CLEANUP_INTERVAL_MS = 1000 * 60 * 5;
 
 /**
@@ -56,10 +54,8 @@ class SkoposSDK {
     this.sessionCache = new Map();
     this.visitorCreationLocks = new Map();
     this.eventQueue = [];
-    this.summaryQueue = new Map();
     this.jsErrorQueue = new Map();
     this.eventTimer = null;
-    this.summaryTimer = null;
     this.cacheTimer = null;
     this.jsErrorTimer = null;
 
@@ -75,7 +71,6 @@ class SkoposSDK {
     } else {
       this._log("info", "Batching disabled. Events will be sent immediately.");
     }
-    this.summaryTimer = setInterval(() => this._flushSummaries(), SUMMARY_FLUSH_INTERVAL_MS);
     this.cacheTimer = setInterval(() => this._cleanSessionCache(), SESSION_CACHE_CLEANUP_INTERVAL_MS);
     this.jsErrorTimer = setInterval(() => this._flushJsErrors(), jsErrorBatchInterval);
   }
@@ -473,7 +468,6 @@ class SkoposSDK {
   async shutdown() {
     this._log("info", "Shutdown initiated.");
     if (this.eventTimer) clearInterval(this.eventTimer);
-    if (this.summaryTimer) clearInterval(this.summaryTimer);
     if (this.cacheTimer) clearInterval(this.cacheTimer);
     if (this.jsErrorTimer) clearInterval(this.jsErrorTimer);
     this._log("debug", "All timers cleared.");
@@ -482,7 +476,6 @@ class SkoposSDK {
     this._log("debug", "Unsubscribed from real-time updates.");
     await this.flushEvents();
     await this._flushJsErrors();
-    await this._flushSummaries();
     this._log("info", "All queues have been flushed.");
     this._log("info", "Shutdown complete.");
   }
@@ -522,204 +515,6 @@ class SkoposSDK {
       this._log("info", "Re-authentication successful.");
     } catch (error) {
       this._log("error", "Failed to re-authenticate admin.", error);
-    }
-  }
-
-  /**
-   * Updates the dashboard summary for today with pageviews, visitors, breakdowns, etc.
-   * Creates the record for today if it doesn't exist (handles race conditions).
-   * @private
-   * @param {object} data Data including at minimum siteId, type, path, referrer etc.
-   * @param {boolean} isNewSession Whether this is a new session.
-   * @returns {Promise<void>}
-   */
-  _updateDashboardSummary(data, eventDate) {
-    const dateForSummary = eventDate || new Date();
-    const year = dateForSummary.getUTCFullYear();
-    const month = String(dateForSummary.getUTCMonth() + 1).padStart(2, "0");
-    const day = String(dateForSummary.getUTCDate()).padStart(2, "0");
-    const summaryDateString = `${year}-${month}-${day}`;
-
-    let summary = this.summaryQueue.get(summaryDateString);
-    if (!summary) {
-      this._log("debug", `Creating new in-memory summary for date: ${summaryDateString}`);
-      summary = {
-        pageViews: 0,
-        visitors: 0,
-        newVisitors: 0,
-        returningVisitors: 0,
-        engagedSessions: 0,
-        jsErrors: 0,
-        topPages: new Map(),
-        entryPages: new Map(),
-        exitPages: new Map(),
-        topReferrers: new Map(),
-        deviceBreakdown: new Map(),
-        browserBreakdown: new Map(),
-        languageBreakdown: new Map(),
-        countryBreakdown: new Map(),
-        topCustomEvents: new Map(),
-        topJsErrors: new Map(),
-      };
-      this.summaryQueue.set(summaryDateString, summary);
-    }
-
-    const updateMap = (map, key) => {
-      if (!key) return;
-      map.set(key, (map.get(key) || 0) + 1);
-    };
-
-    if (data.isNewSession) {
-      summary.visitors++;
-      if (data.isNewVisitor) {
-        summary.newVisitors++;
-      } else {
-        summary.returningVisitors++;
-      }
-      updateMap(summary.deviceBreakdown, data.device);
-      updateMap(summary.browserBreakdown, data.browser);
-      updateMap(summary.languageBreakdown, data.language);
-      updateMap(summary.countryBreakdown, data.country);
-
-      let referrerHost = "Direct";
-      if (data.referrer) {
-        try {
-          referrerHost = new URL(data.referrer).hostname.replace("www.", "");
-        } catch (e) {
-          referrerHost = data.referrer;
-        }
-      }
-      updateMap(summary.topReferrers, referrerHost);
-      updateMap(summary.entryPages, data.path);
-    }
-
-    if (data.isEngaged) {
-      summary.engagedSessions++;
-    }
-
-    if (data.expiredSessionPath) {
-      updateMap(summary.exitPages, data.expiredSessionPath);
-    }
-
-    if (data.type === "pageView") {
-      summary.pageViews++;
-      updateMap(summary.topPages, data.path);
-    } else if (data.type === "custom" && data.name) {
-      updateMap(summary.topCustomEvents, data.name);
-    } else if (data.type === "jsError" && data.errorMessage) {
-      summary.jsErrors++;
-      updateMap(summary.topJsErrors, data.errorMessage);
-    }
-  }
-
-  /**
-   * Flushes the in-memory summary queue to the PocketBase summaries collection.
-   * Merges with existing records or creates new ones as needed.
-   * @private
-   * @returns {Promise<void>}
-   */
-  async _flushSummaries() {
-    if (this.summaryQueue.size === 0) {
-      return;
-    }
-
-    this._log("info", `Flushing ${this.summaryQueue.size} daily summaries.`);
-    await this._ensureAdminAuth();
-    const summariesToFlush = new Map(this.summaryQueue);
-    this.summaryQueue.clear();
-
-    for (const [dateString, summaryData] of summariesToFlush.entries()) {
-      this._log("debug", `Flushing summary for date: ${dateString}`);
-      const filter = `website="${this.websiteRecordId}" && date ~ "${dateString}%"`;
-      let summaryRecord;
-
-      try {
-        summaryRecord = await this.pb.collection(SUMMARIES_COLLECTION).getFirstListItem(filter);
-      } catch (error) {
-        if (error.status === 404) {
-          try {
-            this._log("debug", `No summary record found for ${dateString}, creating a new one.`);
-            const initialSummary = {
-              pageViews: 0,
-              visitors: 0,
-              newVisitors: 0,
-              returningVisitors: 0,
-              engagedSessions: 0,
-              jsErrors: 0,
-              topPages: [],
-              entryPages: [],
-              exitPages: [],
-              topReferrers: [],
-              deviceBreakdown: [],
-              browserBreakdown: [],
-              languageBreakdown: [],
-              countryBreakdown: [],
-              topCustomEvents: [],
-              topJsErrors: [],
-            };
-            summaryRecord = await this.pb.collection(SUMMARIES_COLLECTION).create({
-              website: this.websiteRecordId,
-              date: `${dateString} 00:00:00.000Z`,
-              summary: initialSummary,
-              isFinalized: false,
-            });
-          } catch (creationError) {
-            if (creationError.status === 400) {
-              this._log("warn", "Race condition detected on summary creation, re-fetching.");
-              await new Promise((resolve) => setTimeout(resolve, 100));
-              summaryRecord = await this.pb.collection(SUMMARIES_COLLECTION).getFirstListItem(filter);
-            } else {
-              this._log("error", "Error creating summary record.", creationError);
-              continue;
-            }
-          }
-        } else {
-          this._log("error", "Error fetching summary record.", error);
-          continue;
-        }
-      }
-
-      /**
-       * Updates an array (breakdown) with the given key (e.g., browser, language).
-       * @param {Array<{key: string, count: number}>} list
-       * @param {string} key
-       */
-      const updateBreakdown = (list, map) => {
-        for (const [key, count] of map.entries()) {
-          const item = list.find((it) => it.key === key);
-          if (item) {
-            item.count += count;
-          } else {
-            list.push({ key, count });
-          }
-        }
-      };
-
-      const currentSummary = summaryRecord.summary;
-      currentSummary.pageViews += summaryData.pageViews;
-      currentSummary.visitors += summaryData.visitors;
-      currentSummary.newVisitors += summaryData.newVisitors;
-      currentSummary.returningVisitors += summaryData.returningVisitors;
-      currentSummary.engagedSessions += summaryData.engagedSessions;
-      currentSummary.jsErrors += summaryData.jsErrors;
-
-      updateBreakdown(currentSummary.topPages, summaryData.topPages);
-      updateBreakdown(currentSummary.entryPages, summaryData.entryPages);
-      updateBreakdown(currentSummary.exitPages, summaryData.exitPages);
-      updateBreakdown(currentSummary.topReferrers, summaryData.topReferrers);
-      updateBreakdown(currentSummary.deviceBreakdown, summaryData.deviceBreakdown);
-      updateBreakdown(currentSummary.browserBreakdown, summaryData.browserBreakdown);
-      updateBreakdown(currentSummary.languageBreakdown, summaryData.languageBreakdown);
-      updateBreakdown(currentSummary.countryBreakdown, summaryData.countryBreakdown);
-      updateBreakdown(currentSummary.topCustomEvents, summaryData.topCustomEvents);
-      updateBreakdown(currentSummary.topJsErrors, summaryData.topJsErrors);
-
-      try {
-        await this.pb.collection(SUMMARIES_COLLECTION).update(summaryRecord.id, { summary: currentSummary });
-        this._log("debug", `Successfully flushed summary for ${dateString}.`);
-      } catch (updateError) {
-        this._log("error", "Failed to flush dashboard summary.", updateError);
-      }
     }
   }
 
@@ -797,8 +592,6 @@ class SkoposSDK {
           discardedCount++;
         } else {
           this._log("debug", `Expiring session for visitorId: ${visitorId}`);
-          const lastActivityDate = new Date(sessionData.lastActivity);
-          this._updateDashboardSummary({ expiredSessionPath: sessionData.lastPath }, lastActivityDate);
           this.sessionCache.delete(visitorId);
           cleanedCount++;
         }
@@ -922,15 +715,6 @@ class SkoposSDK {
           isEngaged = true;
         }
 
-        if (this.discardShortSessions && !cachedSession.summaryUpdated) {
-          const sessionDuration = now - cachedSession.startTime;
-          const sessionDurationSeconds = sessionDuration / 1000;
-          if (sessionDurationSeconds >= 1 || cachedSession.eventCount >= 2) {
-            isNewSession = true;
-            isNewVisitor = cachedSession.isNewVisitor || false;
-          }
-        }
-
         activeSession = cachedSession;
         this._log("debug", `Existing session found for visitor ${visitorId}: ${sessionId}`);
       }
@@ -939,10 +723,6 @@ class SkoposSDK {
     if (!activeSession) {
       isNewSession = true;
       this._log("info", `No active session found for visitor ${visitorId}. Creating a new one.`);
-      if (cachedSession) {
-        const lastActivityDate = new Date(cachedSession.lastActivity);
-        this._updateDashboardSummary({ expiredSessionPath: cachedSession.lastPath }, lastActivityDate);
-      }
 
       const { visitor, isNewVisitor: newVisitor } = await this._getOrCreateVisitor(visitorId);
       isNewVisitor = newVisitor;
@@ -989,43 +769,22 @@ class SkoposSDK {
           eventCount: 1,
           lastPath: path,
           isEngaged: sessionIsEngaged,
-          summaryUpdated: false,
           isNewVisitor,
           uaDetails,
           country,
           state,
         });
-
-        if (!this.discardShortSessions) {
-          this._updateDashboardSummary({ ...data, ...uaDetails, country, state, isNewSession, isNewVisitor, isEngaged });
-          this.sessionCache.get(visitorId).summaryUpdated = true;
-        }
       } catch (e) {
         this._log("error", "Error creating session.", e);
         return;
       }
     } else {
-      if (this.discardShortSessions && !cachedSession.summaryUpdated) {
+      if (this.discardShortSessions && cachedSession.eventCount === 1) {
         const sessionDuration = now - cachedSession.startTime;
         const sessionDurationSeconds = sessionDuration / 1000;
         if (sessionDurationSeconds >= 1 || cachedSession.eventCount >= 2) {
-          const summaryData = {
-            ...data,
-            browser: cachedSession.uaDetails?.browser,
-            os: cachedSession.uaDetails?.os,
-            device: cachedSession.uaDetails?.device,
-            country: cachedSession.country,
-            state: cachedSession.state,
-            isNewSession: true,
-            isNewVisitor: cachedSession.isNewVisitor || false,
-            isEngaged: cachedSession.isEngaged || false,
-          };
-          this._updateDashboardSummary(summaryData);
-          cachedSession.summaryUpdated = true;
-          this._log("debug", `Session ${sessionId} has proven to be real (${sessionDurationSeconds.toFixed(3)}s, ${cachedSession.eventCount} events), updating summary.`);
+          this._log("debug", `Session ${sessionId} has proven to be real (${sessionDurationSeconds.toFixed(3)}s, ${cachedSession.eventCount} events).`);
         }
-      } else if (!this.discardShortSessions) {
-        this._updateDashboardSummary({ ...data, country, state, isNewSession, isNewVisitor, isEngaged });
       }
     }
 
