@@ -107,8 +107,6 @@ const SkoposSDK = require("@alphasystem/skopos");
 | `jsErrorBatchInterval` | `number` | `5 * 60 * 1000` | Flush cadence for deduplicated JS errors. |
 | `debug` | `boolean` | `false` | Enables verbose internal logging (errors are always logged). |
 
-The SDK also honors real-time flags stored on the `websites` record (e.g., `disableLocalhostTracking`, `ipBlacklist`, `discardShortSessions`, `storeRawIp`). Updates propagate automatically through the PocketBase subscription.
-
 ---
 
 ### Core APIs
@@ -165,7 +163,6 @@ The SDK automatically rejects malformed data, non-HTTP(S) URLs, oversized payloa
 - Visitors are anonymized via SHA-256 of `siteId + ip + user-agent`.
 - Sessions expire after `sessionTimeoutMs` of inactivity. A cached session will renew as long as the SDK can still write to PocketBase.
 - Engagement is tracked when either multiple events exist or a `duration` custom field exceeds 10 seconds. This drives the engagement rate surfaced in the dashboard.
-- If `discardShortSessions` is true, sub-second sessions are removed automatically by both the SDK cache and scheduled cleanup jobs.
 
 ### Error Tracking
 `trackApiEvent` accepts a `type: "jsError"` payload. The SDK hashes `errorMessage + stack trace` so repeated crashes are merged. Batched errors persist to the `js_errors` collection during `_flushJsErrors()`.

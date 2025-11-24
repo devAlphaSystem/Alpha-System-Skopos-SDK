@@ -49,7 +49,6 @@ class SkoposSDK {
     this.isArchived = false;
     this.ipBlacklist = [];
     this.storeRawIp = false;
-    this.discardShortSessions = false;
     this.sessionTimeout = options.sessionTimeoutMs ?? DEFAULT_SESSION_TIMEOUT_MS;
     this.sessionCache = new Map();
     this.visitorCreationLocks = new Map();
@@ -146,9 +145,7 @@ class SkoposSDK {
       sdk.isArchived = websiteRecord.isArchived || false;
       sdk.ipBlacklist = websiteRecord.ipBlacklist || [];
       sdk.storeRawIp = websiteRecord.storeRawIp || false;
-      sdk.discardShortSessions = websiteRecord.discardShortSessions || false;
       sdk._log("info", `Successfully loaded configuration for website: ${sdk.domain || sdk.websiteRecordId}`);
-      sdk._log("info", `Discard short sessions: ${sdk.discardShortSessions}`);
 
       try {
         await sdk.pb.collection("websites").update(sdk.websiteRecordId, {
@@ -177,8 +174,6 @@ class SkoposSDK {
           sdk.ipBlacklist = e.record.ipBlacklist || [];
           sdk.isArchived = e.record.isArchived || false;
           sdk.storeRawIp = e.record.storeRawIp || false;
-          sdk.discardShortSessions = e.record.discardShortSessions || false;
-          sdk._log("info", `Discard short sessions updated: ${sdk.discardShortSessions}`);
         }
       });
       sdk._log("info", "Successfully subscribed to configuration changes.");
@@ -575,33 +570,15 @@ class SkoposSDK {
     this._log("debug", "Running session cache cleanup...");
     const now = Date.now();
     let cleanedCount = 0;
-    let discardedCount = 0;
     for (const [visitorId, sessionData] of this.sessionCache.entries()) {
       if (now - sessionData.lastActivity > this.sessionTimeout) {
-        const sessionDuration = sessionData.lastActivity - sessionData.startTime;
-        const sessionDurationSeconds = sessionDuration / 1000;
-
-        if (this.discardShortSessions && sessionDurationSeconds < 1) {
-          this._log("debug", `Discarding short session for visitorId: ${visitorId} (duration: ${sessionDurationSeconds.toFixed(3)}s)`);
-          this._ensureAdminAuth()
-            .then(() => this.pb.collection(SESSIONS_COLLECTION).delete(sessionData.sessionId))
-            .catch((err) => {
-              this._log("warn", `Failed to delete short session ${sessionData.sessionId}: ${err.message}`);
-            });
-          this.sessionCache.delete(visitorId);
-          discardedCount++;
-        } else {
-          this._log("debug", `Expiring session for visitorId: ${visitorId}`);
-          this.sessionCache.delete(visitorId);
-          cleanedCount++;
-        }
+        this._log("debug", `Expiring session for visitorId: ${visitorId}`);
+        this.sessionCache.delete(visitorId);
+        cleanedCount++;
       }
     }
     if (cleanedCount > 0) {
       this._log("info", `Cleaned ${cleanedCount} expired sessions from cache.`);
-    }
-    if (discardedCount > 0) {
-      this._log("info", `Discarded ${discardedCount} short sessions (<1s).`);
     }
   }
 
@@ -751,16 +728,16 @@ class SkoposSDK {
         sessionData.ipAddress = ip;
       }
 
+      let sessionIsEngaged = false;
+      if (customData?.duration && customData.duration > 10) {
+        isEngaged = true;
+        sessionIsEngaged = true;
+      }
+
       try {
         const newSession = await this.pb.collection(SESSIONS_COLLECTION).create(sessionData);
         sessionId = newSession.id;
         this._log("info", `New session created: ${sessionId} for visitor ${visitor.id}`);
-
-        let sessionIsEngaged = false;
-        if (customData?.duration && customData.duration > 10) {
-          isEngaged = true;
-          sessionIsEngaged = true;
-        }
 
         this.sessionCache.set(visitorId, {
           sessionId,
@@ -777,14 +754,6 @@ class SkoposSDK {
       } catch (e) {
         this._log("error", "Error creating session.", e);
         return;
-      }
-    } else {
-      if (this.discardShortSessions && cachedSession.eventCount === 1) {
-        const sessionDuration = now - cachedSession.startTime;
-        const sessionDurationSeconds = sessionDuration / 1000;
-        if (sessionDurationSeconds >= 1 || cachedSession.eventCount >= 2) {
-          this._log("debug", `Session ${sessionId} has proven to be real (${sessionDurationSeconds.toFixed(3)}s, ${cachedSession.eventCount} events).`);
-        }
       }
     }
 
@@ -805,7 +774,7 @@ class SkoposSDK {
         existingError.count++;
       } else {
         this.jsErrorQueue.set(errorHash, {
-          sessionId,
+          sessionId: sessionId,
           errorMessage,
           stackTrace,
           url: safeUrl,
