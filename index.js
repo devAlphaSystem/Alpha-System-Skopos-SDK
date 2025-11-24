@@ -18,6 +18,7 @@ const DEFAULT_MAX_BATCH_SIZE = 100;
 const DEFAULT_SESSION_TIMEOUT_MS = 1000 * 60 * 30;
 const DEFAULT_ERROR_BATCH_INTERVAL_MS = 1000 * 60 * 5;
 const SESSION_CACHE_CLEANUP_INTERVAL_MS = 1000 * 60 * 5;
+const AUTH_CHECK_INTERVAL_MS = 1000 * 60 * 10;
 
 /**
  * The main Skopos SDK class for server-side event tracking.
@@ -48,15 +49,19 @@ class SkoposSDK {
     this.disableLocalhostTracking = false;
     this.isArchived = false;
     this.ipBlacklist = [];
+    this.ipBlacklistSet = new Set();
     this.storeRawIp = false;
     this.sessionTimeout = options.sessionTimeoutMs ?? DEFAULT_SESSION_TIMEOUT_MS;
     this.sessionCache = new Map();
     this.visitorCreationLocks = new Map();
+    this.visitorCache = new Map();
     this.eventQueue = [];
     this.jsErrorQueue = new Map();
     this.eventTimer = null;
     this.cacheTimer = null;
     this.jsErrorTimer = null;
+    this.authCheckTimer = null;
+    this.lastAuthCheck = 0;
 
     this.batchingEnabled = options.batch ?? false;
     this.batchInterval = options.batchInterval ?? DEFAULT_BATCH_INTERVAL_MS;
@@ -72,6 +77,8 @@ class SkoposSDK {
     }
     this.cacheTimer = setInterval(() => this._cleanSessionCache(), SESSION_CACHE_CLEANUP_INTERVAL_MS);
     this.jsErrorTimer = setInterval(() => this._flushJsErrors(), jsErrorBatchInterval);
+
+    this.authCheckTimer = setInterval(() => this._proactiveAuthRefresh(), AUTH_CHECK_INTERVAL_MS);
   }
 
   /**
@@ -144,6 +151,7 @@ class SkoposSDK {
       sdk.disableLocalhostTracking = websiteRecord.disableLocalhostTracking;
       sdk.isArchived = websiteRecord.isArchived || false;
       sdk.ipBlacklist = websiteRecord.ipBlacklist || [];
+      sdk.ipBlacklistSet = new Set(sdk.ipBlacklist);
       sdk.storeRawIp = websiteRecord.storeRawIp || false;
       sdk._log("info", `Successfully loaded configuration for website: ${sdk.domain || sdk.websiteRecordId}`);
 
@@ -172,6 +180,7 @@ class SkoposSDK {
           sdk.domain = getSanitizedDomain(e.record.domain);
           sdk.disableLocalhostTracking = e.record.disableLocalhostTracking;
           sdk.ipBlacklist = e.record.ipBlacklist || [];
+          sdk.ipBlacklistSet = new Set(sdk.ipBlacklist);
           sdk.isArchived = e.record.isArchived || false;
           sdk.storeRawIp = e.record.storeRawIp || false;
         }
@@ -402,11 +411,18 @@ class SkoposSDK {
 
   /**
    * Gets or creates a visitor with proper locking to prevent race conditions.
+   * Uses an in-memory cache to reduce database lookups for repeat visitors.
    * @private
    * @param {string} visitorId The hashed visitor ID.
    * @returns {Promise<{visitor: object, isNewVisitor: boolean}>}
    */
   async _getOrCreateVisitor(visitorId) {
+    const cachedVisitor = this.visitorCache.get(visitorId);
+    if (cachedVisitor) {
+      this._log("debug", `Found cached visitor ${visitorId}`);
+      return { visitor: cachedVisitor, isNewVisitor: false };
+    }
+
     if (this.visitorCreationLocks.has(visitorId)) {
       this._log("debug", `Waiting for ongoing visitor creation: ${visitorId}`);
       return await this.visitorCreationLocks.get(visitorId);
@@ -419,6 +435,7 @@ class SkoposSDK {
         try {
           const visitor = await this.pb.collection(VISITORS_COLLECTION).getFirstListItem(`visitorId="${visitorId}"`);
           this._log("debug", `Found existing visitor ${visitorId}`);
+          this.visitorCache.set(visitorId, visitor);
           return { visitor, isNewVisitor: false };
         } catch (error) {
           if (error.status === 404) {
@@ -429,11 +446,13 @@ class SkoposSDK {
                 visitorId,
               });
               this._log("debug", `Created new visitor: ${visitor.id}`);
+              this.visitorCache.set(visitorId, visitor);
               return { visitor, isNewVisitor: true };
             } catch (createError) {
               if (createError.status === 400 || createError.data?.data?.visitorId) {
                 this._log("warn", "Race condition detected on visitor creation, re-fetching.");
                 const visitor = await this.pb.collection(VISITORS_COLLECTION).getFirstListItem(`visitorId="${visitorId}"`);
+                this.visitorCache.set(visitorId, visitor);
                 return { visitor, isNewVisitor: false };
               }
               throw createError;
@@ -465,6 +484,7 @@ class SkoposSDK {
     if (this.eventTimer) clearInterval(this.eventTimer);
     if (this.cacheTimer) clearInterval(this.cacheTimer);
     if (this.jsErrorTimer) clearInterval(this.jsErrorTimer);
+    if (this.authCheckTimer) clearInterval(this.authCheckTimer);
     this._log("debug", "All timers cleared.");
     this._cleanSessionCache();
     await this.pb.realtime.unsubscribe();
@@ -477,6 +497,7 @@ class SkoposSDK {
 
   /**
    * Immediately flushes any queued events to the PocketBase events collection.
+   * Uses parallel writes for better throughput.
    * @returns {Promise<void>}
    */
   async flushEvents() {
@@ -488,8 +509,14 @@ class SkoposSDK {
     this.eventQueue = [];
     this._log("info", `Flushing ${eventsToSend.length} events.`);
 
-    const promises = eventsToSend.map((event) => this._sendEvent(event));
-    await Promise.allSettled(promises);
+    await this._ensureAdminAuth();
+
+    const BATCH_SIZE = 10;
+    for (let i = 0; i < eventsToSend.length; i += BATCH_SIZE) {
+      const batch = eventsToSend.slice(i, i + BATCH_SIZE);
+      const promises = batch.map((event) => this._sendEvent(event));
+      await Promise.allSettled(promises);
+    }
   }
 
   /**
@@ -507,9 +534,41 @@ class SkoposSDK {
     try {
       this._log("info", "Admin token expired or invalid. Re-authenticating...");
       await this.pb.collection("_superusers").authWithPassword(this.adminEmail, this.adminPassword);
+      this.lastAuthCheck = Date.now();
       this._log("info", "Re-authentication successful.");
     } catch (error) {
       this._log("error", "Failed to re-authenticate admin.", error);
+    }
+  }
+
+  /**
+   * Proactively refresh auth before it expires to avoid delays during event processing.
+   * @private
+   */
+  async _proactiveAuthRefresh() {
+    if (!this.adminEmail) return;
+
+    if (Date.now() - this.lastAuthCheck < AUTH_CHECK_INTERVAL_MS / 2) return;
+
+    try {
+      const token = this.pb.authStore.token;
+      if (token) {
+        try {
+          const payload = JSON.parse(atob(token.split(".")[1]));
+          const expiresIn = payload.exp * 1000 - Date.now();
+          if (expiresIn > 15 * 60 * 1000) {
+            this._log("debug", "Token still valid for more than 15 minutes, skipping proactive refresh.");
+            return;
+          }
+        } catch (e) {}
+      }
+
+      this._log("info", "Proactively refreshing admin token...");
+      await this.pb.collection("_superusers").authWithPassword(this.adminEmail, this.adminPassword);
+      this.lastAuthCheck = Date.now();
+      this._log("info", "Proactive token refresh successful.");
+    } catch (error) {
+      this._log("warn", "Proactive auth refresh failed, will retry on next event.", error);
     }
   }
 
@@ -616,7 +675,7 @@ class SkoposSDK {
       return;
     }
 
-    if (this.ipBlacklist.includes(ip)) {
+    if (ip && this.ipBlacklistSet.has(ip)) {
       this._log("warn", `Event ignored, IP ${ip} is in blacklist.`);
       return;
     }
@@ -666,18 +725,23 @@ class SkoposSDK {
     let isEngaged = false;
 
     if (cachedSession && now - cachedSession.lastActivity < this.sessionTimeout) {
+      const shouldVerifySession = !cachedSession.lastVerified || now - cachedSession.lastVerified > 60000;
+
       let sessionStillValid = true;
 
-      try {
-        await this.pb.collection(SESSIONS_COLLECTION).update(cachedSession.sessionId, {});
-      } catch (err) {
-        if (err.status === 404) {
-          this._log("warn", `Session ${cachedSession.sessionId} not found in DB, removing from cache and will create a new one.`);
-          this.sessionCache.delete(visitorId);
-          sessionStillValid = false;
-        } else {
-          this._log("error", `Failed to update session for ${cachedSession.sessionId}.`, err.message);
-          sessionStillValid = false;
+      if (shouldVerifySession) {
+        try {
+          await this.pb.collection(SESSIONS_COLLECTION).update(cachedSession.sessionId, {});
+          cachedSession.lastVerified = now;
+        } catch (err) {
+          if (err.status === 404) {
+            this._log("warn", `Session ${cachedSession.sessionId} not found in DB, removing from cache and will create a new one.`);
+            this.sessionCache.delete(visitorId);
+            sessionStillValid = false;
+          } else {
+            this._log("error", `Failed to update session for ${cachedSession.sessionId}.`, err.message);
+            sessionStillValid = false;
+          }
         }
       }
 
@@ -742,6 +806,7 @@ class SkoposSDK {
         this.sessionCache.set(visitorId, {
           sessionId,
           lastActivity: now,
+          lastVerified: now,
           startTime: now,
           eventCount: 1,
           lastPath: path,

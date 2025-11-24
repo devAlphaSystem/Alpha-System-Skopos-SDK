@@ -2,6 +2,23 @@ const { isbot } = require("isbot");
 const UAParser = require("ua-parser-js");
 const { createHash } = require("node:crypto");
 
+const BOT_CACHE_MAX_SIZE = 1000;
+const botDetectionCache = new Map();
+
+/**
+ * Simple cache cleanup - removes oldest entries when cache is full
+ */
+function cleanBotCache() {
+  if (botDetectionCache.size > BOT_CACHE_MAX_SIZE) {
+    let count = 0;
+    for (const key of botDetectionCache.keys()) {
+      botDetectionCache.delete(key);
+      count++;
+      if (count >= 100) break;
+    }
+  }
+}
+
 /**
  * Assigns a score based on various indicators to determine if a request
  * is likely from a bot. A higher score means a higher probability of being a bot.
@@ -18,46 +35,38 @@ function calculateBotScore(userAgent, headers) {
   }
 
   if (!userAgent || userAgent.length < 10) {
-    score += 80;
+    return 80;
   }
 
-  if (userAgent && userAgent.length > 512) {
+  if (userAgent.length > 512) {
     score += 40;
   }
 
-  if (userAgent && /HeadlessChrome|Puppeteer|PhantomJS|Selenium|Playwright|Crawl(er|bot)|Spider|Scraper|Monitor(ing)?|Archiver|Screenshot|Validator|Lighthouse|AhrefsBot|SemrushBot|MJ12bot|PetalBot|YandexBot|Bingbot|Googlebot|Baiduspider|DotBot|Applebot|facebookexternalhit|Slackbot|Discordbot|Twitterbot|LinkedInBot|WhatsApp|TelegramBot/i.test(userAgent)) {
-    score += 70;
+  const botPatterns = /HeadlessChrome|Puppeteer|PhantomJS|Selenium|Playwright|Crawl(er|bot)|Spider|Scraper|Monitor(ing)?|Archiver|Screenshot|Validator|Lighthouse|AhrefsBot|SemrushBot|MJ12bot|PetalBot|YandexBot|Bingbot|Googlebot|Baiduspider|DotBot|Applebot|facebookexternalhit|Slackbot|Discordbot|Twitterbot|LinkedInBot|WhatsApp|TelegramBot|^curl\/|^wget\/|^python-requests\/|^Go-http-client\/|^Java\/|^okhttp\/|^Apache-HttpClient\/|^Axios\/|^node-fetch\/|^got\/|^Postman|sqlmap|nikto|nmap|masscan|nessus|burpsuite|metasploit|nuclei|acunetix|w3af|zaproxy/i;
+
+  if (botPatterns.test(userAgent)) {
+    return 90;
   }
 
-  if (userAgent && /^curl\/|^wget\/|^python-requests\/|^Go-http-client\/|^Java\/|^okhttp\/|^Apache-HttpClient\/|^Axios\/|^node-fetch\/|^got\/|^Postman/i.test(userAgent)) {
-    score += 60;
+  const parser = new UAParser(userAgent);
+  const uaInfo = parser.getResult();
+
+  if (!uaInfo.browser.name && !uaInfo.os.name && userAgent.length > 20) {
+    score += 40;
   }
 
-  if (userAgent && /sqlmap|nikto|nmap|masscan|nessus|burpsuite|metasploit|nuclei|acunetix|w3af|zaproxy/i.test(userAgent)) {
-    score += 90;
+  if (uaInfo.device.type && (uaInfo.device.type === "spider" || uaInfo.device.type === "bot")) {
+    score += 50;
   }
 
-  if (userAgent && userAgent.length > 10) {
-    const parser = new UAParser(userAgent);
-    const uaInfo = parser.getResult();
+  if (uaInfo.browser.name === "Other" && !uaInfo.os.name && !uaInfo.device.type) {
+    score += 30;
+  }
 
-    if (!uaInfo.browser.name && !uaInfo.os.name && userAgent.length > 20) {
-      score += 40;
-    }
-
-    if (uaInfo.device.type && (uaInfo.device.type === "spider" || uaInfo.device.type === "bot")) {
-      score += 50;
-    }
-
-    if (uaInfo.browser.name === "Other" && !uaInfo.os.name && !uaInfo.device.type) {
-      score += 30;
-    }
-
-    if (uaInfo.browser.name && uaInfo.browser.version) {
-      const majorVersion = parseInt(uaInfo.browser.version.split(".")[0], 10);
-      if ((uaInfo.browser.name === "Chrome" && majorVersion < 80) || (uaInfo.browser.name === "Firefox" && majorVersion < 70) || (uaInfo.browser.name === "Safari" && majorVersion < 12) || (uaInfo.browser.name === "Edge" && majorVersion < 80)) {
-        score += 25;
-      }
+  if (uaInfo.browser.name && uaInfo.browser.version) {
+    const majorVersion = Number.parseInt(uaInfo.browser.version.split(".")[0], 10);
+    if ((uaInfo.browser.name === "Chrome" && majorVersion < 80) || (uaInfo.browser.name === "Firefox" && majorVersion < 70) || (uaInfo.browser.name === "Safari" && majorVersion < 12) || (uaInfo.browser.name === "Edge" && majorVersion < 80)) {
+      score += 25;
     }
   }
 
@@ -87,12 +96,12 @@ function calculateBotScore(userAgent, headers) {
     const suspiciousHeaders = ["x-selenium", "x-puppeteer", "x-playwright", "x-automated", "x-webdriver"];
     for (const header of suspiciousHeaders) {
       if (headers[header]) {
-        score += 80;
+        return 100;
       }
     }
 
-    if (headers["sec-ch-ua-platform"] && headers["sec-ch-ua-platform"].includes("Headless")) {
-      score += 60;
+    if (headers["sec-ch-ua-platform"]?.includes("Headless")) {
+      return 100;
     }
 
     if (userAgent && /Chrome|Edge/i.test(userAgent) && !headers["sec-fetch-site"]) {
@@ -115,7 +124,7 @@ function calculateBotScore(userAgent, headers) {
 
 /**
  * Detects if a user agent string belongs to a known bot, crawler, or headless browser
- * based on a scoring system.
+ * based on a scoring system. Results are cached for performance.
  * @param {string | undefined} userAgent The user agent string from the request headers.
  * @param {object | undefined} headers All request headers as an object.
  * @returns {boolean} True if the request is likely a bot.
@@ -123,8 +132,22 @@ function calculateBotScore(userAgent, headers) {
 function detectBot(userAgent, headers) {
   const BOT_SCORE_THRESHOLD = 70;
 
+  if (userAgent) {
+    const cached = botDetectionCache.get(userAgent);
+    if (cached !== undefined) {
+      return cached;
+    }
+  }
+
   const score = calculateBotScore(userAgent, headers);
-  return score >= BOT_SCORE_THRESHOLD;
+  const isBot = score >= BOT_SCORE_THRESHOLD;
+
+  if (userAgent) {
+    cleanBotCache();
+    botDetectionCache.set(userAgent, isBot);
+  }
+
+  return isBot;
 }
 
 /**
