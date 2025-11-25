@@ -793,23 +793,21 @@ class SkoposSDK {
     let isEngaged = false;
 
     if (cachedSession && now - cachedSession.lastActivity < this.sessionTimeout) {
-      const shouldVerifySession = !cachedSession.lastVerified || now - cachedSession.lastVerified > 60000;
-
       let sessionStillValid = true;
 
-      if (shouldVerifySession) {
-        try {
-          await this.pb.collection(SESSIONS_COLLECTION).update(cachedSession.sessionId, {});
-          cachedSession.lastVerified = now;
-        } catch (err) {
-          if (err.status === 404) {
-            this._log("warn", `Session ${cachedSession.sessionId} not found in DB, removing from cache and will create a new one.`);
-            this.sessionCache.delete(visitorId);
-            sessionStillValid = false;
-          } else {
-            this._log("error", `Failed to update session for ${cachedSession.sessionId}.`, err.message);
-            sessionStillValid = false;
-          }
+      try {
+        await this.pb.collection(SESSIONS_COLLECTION).update(cachedSession.sessionId, {
+          exitPath: path,
+        });
+        cachedSession.lastVerified = now;
+      } catch (err) {
+        if (err.status === 404) {
+          this._log("warn", `Session ${cachedSession.sessionId} not found in DB, removing from cache and will create a new one.`);
+          this.sessionCache.delete(visitorId);
+          sessionStillValid = false;
+        } else {
+          this._log("error", `Failed to update session for ${cachedSession.sessionId}.`, err.message);
+          sessionStillValid = false;
         }
       }
 
