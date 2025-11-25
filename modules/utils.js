@@ -3,18 +3,50 @@ const UAParser = require("ua-parser-js");
 const { createHash } = require("node:crypto");
 
 const BOT_CACHE_MAX_SIZE = 1000;
+const BOT_CACHE_TTL_MS = 1000 * 60 * 30;
+const BOT_CACHE_CLEANUP_INTERVAL_MS = 1000 * 60 * 5;
 const botDetectionCache = new Map();
+let lastBotCacheCleanup = 0;
+
+const uaParser = new UAParser();
+
+const BOT_PATTERNS = /HeadlessChrome|Puppeteer|PhantomJS|Selenium|Playwright|Crawl(er|bot)|Spider|Scraper|Monitor(ing)?|Archiver|Screenshot|Validator|Lighthouse|AhrefsBot|SemrushBot|MJ12bot|PetalBot|YandexBot|Bingbot|Googlebot|Baiduspider|DotBot|Applebot|facebookexternalhit|Slackbot|Discordbot|Twitterbot|LinkedInBot|WhatsApp|TelegramBot|^curl\/|^wget\/|^python-requests\/|^Go-http-client\/|^Java\/|^okhttp\/|^Apache-HttpClient\/|^Axios\/|^node-fetch\/|^got\/|^Postman|sqlmap|nikto|nmap|masscan|nessus|burpsuite|metasploit|nuclei|acunetix|w3af|zaproxy/i;
+const CHROME_EDGE_PATTERN = /Chrome|Edge/i;
+const BOT_REFERER_PATTERN = /bot|crawl|spider|scrape/i;
+const ACCEPT_HEADER_PATTERN = /html|xml|xhtml|json|\*\//i;
+const PRIVATE_IP_PATTERN = /^172\.(1[6-9]|2\d|3[0-1])\./;
+const CONTROL_CHARS_PATTERN = /[\x00-\x1F\x7F-\x9F]/g;
+const CONTROL_CHARS_EXTENDED_PATTERN = /[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F]/g;
+
+const VALID_EVENT_TYPES = new Set(["pageView", "custom", "jsError"]);
+const VALID_PROTOCOLS = new Set(["http:", "https:"]);
+const DANGEROUS_KEYS = new Set(["__proto__", "constructor", "prototype"]);
 
 /**
- * Simple cache cleanup - removes oldest entries when cache is full
+ * Cache cleanup - removes expired entries and trims to max size.
+ * Throttled to run at most once every 5 minutes to reduce CPU usage.
  */
 function cleanBotCache() {
-  if (botDetectionCache.size > BOT_CACHE_MAX_SIZE) {
-    let count = 0;
-    for (const key of botDetectionCache.keys()) {
+  const now = Date.now();
+
+  if (now - lastBotCacheCleanup < BOT_CACHE_CLEANUP_INTERVAL_MS) {
+    return;
+  }
+  lastBotCacheCleanup = now;
+
+  for (const [key, value] of botDetectionCache.entries()) {
+    if (now - value.cachedAt > BOT_CACHE_TTL_MS) {
       botDetectionCache.delete(key);
-      count++;
-      if (count >= 100) break;
+    }
+  }
+
+  if (botDetectionCache.size > BOT_CACHE_MAX_SIZE) {
+    const toDelete = botDetectionCache.size - BOT_CACHE_MAX_SIZE + 100;
+    let deleted = 0;
+    for (const key of botDetectionCache.keys()) {
+      if (deleted >= toDelete) break;
+      botDetectionCache.delete(key);
+      deleted++;
     }
   }
 }
@@ -42,14 +74,12 @@ function calculateBotScore(userAgent, headers) {
     score += 40;
   }
 
-  const botPatterns = /HeadlessChrome|Puppeteer|PhantomJS|Selenium|Playwright|Crawl(er|bot)|Spider|Scraper|Monitor(ing)?|Archiver|Screenshot|Validator|Lighthouse|AhrefsBot|SemrushBot|MJ12bot|PetalBot|YandexBot|Bingbot|Googlebot|Baiduspider|DotBot|Applebot|facebookexternalhit|Slackbot|Discordbot|Twitterbot|LinkedInBot|WhatsApp|TelegramBot|^curl\/|^wget\/|^python-requests\/|^Go-http-client\/|^Java\/|^okhttp\/|^Apache-HttpClient\/|^Axios\/|^node-fetch\/|^got\/|^Postman|sqlmap|nikto|nmap|masscan|nessus|burpsuite|metasploit|nuclei|acunetix|w3af|zaproxy/i;
-
-  if (botPatterns.test(userAgent)) {
+  if (BOT_PATTERNS.test(userAgent)) {
     return 90;
   }
 
-  const parser = new UAParser(userAgent);
-  const uaInfo = parser.getResult();
+  uaParser.setUA(userAgent);
+  const uaInfo = uaParser.getResult();
 
   if (!uaInfo.browser.name && !uaInfo.os.name && userAgent.length > 20) {
     score += 40;
@@ -85,7 +115,7 @@ function calculateBotScore(userAgent, headers) {
     }
 
     const acceptHeader = headers.accept;
-    if (acceptHeader && acceptHeader !== "*/*" && !/html|xml|xhtml|json|\*\//i.test(acceptHeader)) {
+    if (acceptHeader && acceptHeader !== "*/*" && !ACCEPT_HEADER_PATTERN.test(acceptHeader)) {
       score += 10;
     }
 
@@ -104,7 +134,7 @@ function calculateBotScore(userAgent, headers) {
       return 100;
     }
 
-    if (userAgent && /Chrome|Edge/i.test(userAgent) && !headers["sec-fetch-site"]) {
+    if (userAgent && CHROME_EDGE_PATTERN.test(userAgent) && !headers["sec-fetch-site"]) {
       score += 15;
     }
 
@@ -114,7 +144,7 @@ function calculateBotScore(userAgent, headers) {
     }
 
     const referer = headers.referer || headers.referrer;
-    if (referer && (/bot|crawl|spider|scrape/i.test(referer) || referer.length > 512)) {
+    if (referer && (BOT_REFERER_PATTERN.test(referer) || referer.length > 512)) {
       score += 30;
     }
   }
@@ -134,8 +164,8 @@ function detectBot(userAgent, headers) {
 
   if (userAgent) {
     const cached = botDetectionCache.get(userAgent);
-    if (cached !== undefined) {
-      return cached;
+    if (cached !== undefined && Date.now() - cached.cachedAt < BOT_CACHE_TTL_MS) {
+      return cached.isBot;
     }
   }
 
@@ -144,7 +174,7 @@ function detectBot(userAgent, headers) {
 
   if (userAgent) {
     cleanBotCache();
-    botDetectionCache.set(userAgent, isBot);
+    botDetectionCache.set(userAgent, { isBot, cachedAt: Date.now() });
   }
 
   return isBot;
@@ -157,8 +187,8 @@ function detectBot(userAgent, headers) {
  * An object containing browser, OS, and device type.
  */
 function parseUserAgent(userAgent) {
-  const parser = new UAParser(userAgent || "");
-  const uaInfo = parser.getResult();
+  uaParser.setUA(userAgent || "");
+  const uaInfo = uaParser.getResult();
 
   return {
     browser: uaInfo.browser.name,
@@ -210,7 +240,7 @@ function validateAndSanitizeApiPayload(payload) {
 
   const { type, name, url, referrer, screenWidth, screenHeight, language, customData, errorMessage, stackTrace } = payload;
 
-  if (typeof type !== "string" || !["pageView", "custom", "jsError"].includes(type)) {
+  if (typeof type !== "string" || !VALID_EVENT_TYPES.has(type)) {
     return null;
   }
 
@@ -221,11 +251,11 @@ function validateAndSanitizeApiPayload(payload) {
   let urlObject;
   try {
     urlObject = new URL(url);
-    if (!["http:", "https:"].includes(urlObject.protocol)) {
+    if (!VALID_PROTOCOLS.has(urlObject.protocol)) {
       return null;
     }
     const hostname = urlObject.hostname.toLowerCase();
-    if (hostname === "localhost" || hostname === "127.0.0.1" || hostname === "0.0.0.0" || hostname.startsWith("192.168.") || hostname.startsWith("10.") || /^172\.(1[6-9]|2\d|3[0-1])\./.test(hostname) || hostname === "::1" || hostname === "[::1]") {
+    if (hostname === "localhost" || hostname === "127.0.0.1" || hostname === "0.0.0.0" || hostname.startsWith("192.168.") || hostname.startsWith("10.") || PRIVATE_IP_PATTERN.test(hostname) || hostname === "::1" || hostname === "[::1]") {
     }
   } catch (e) {
     return null;
@@ -248,10 +278,7 @@ function validateAndSanitizeApiPayload(payload) {
   sanitized.url = urlObject.href.substring(0, 2048);
 
   if (type === "custom") {
-    sanitized.name = name
-      .replace(/[\x00-\x1F\x7F-\x9F]/g, "")
-      .trim()
-      .substring(0, 100);
+    sanitized.name = name.replace(CONTROL_CHARS_PATTERN, "").trim().substring(0, 100);
     if (sanitized.name.length === 0) {
       return null;
     }
@@ -268,7 +295,7 @@ function validateAndSanitizeApiPayload(payload) {
     if (referrer.length > 0) {
       try {
         const refUrl = new URL(referrer);
-        if (!["http:", "https:"].includes(refUrl.protocol)) {
+        if (!VALID_PROTOCOLS.has(refUrl.protocol)) {
           return null;
         }
         sanitized.referrer = refUrl.href.substring(0, 2048);
@@ -298,10 +325,7 @@ function validateAndSanitizeApiPayload(payload) {
     if (typeof language !== "string" || language.length > 100) {
       return null;
     }
-    sanitized.language = language
-      .replace(/[\x00-\x1F\x7F-\x9F]/g, "")
-      .trim()
-      .substring(0, 35);
+    sanitized.language = language.replace(CONTROL_CHARS_PATTERN, "").trim().substring(0, 35);
   }
 
   if (customData !== undefined) {
@@ -317,11 +341,10 @@ function validateAndSanitizeApiPayload(payload) {
 
       const parsed = JSON.parse(customDataString);
 
-      const dangerousKeys = ["__proto__", "constructor", "prototype"];
       const hasDangerousKeys = (obj) => {
         if (typeof obj !== "object" || obj === null) return false;
         for (const key of Object.keys(obj)) {
-          if (dangerousKeys.includes(key.toLowerCase())) return true;
+          if (DANGEROUS_KEYS.has(key.toLowerCase())) return true;
           if (typeof obj[key] === "object" && obj[key] !== null) {
             if (hasDangerousKeys(obj[key])) return true;
           }
@@ -343,14 +366,14 @@ function validateAndSanitizeApiPayload(payload) {
     if (typeof errorMessage !== "string" || errorMessage.length > 2048) {
       return null;
     }
-    sanitized.errorMessage = errorMessage.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F]/g, "").substring(0, 512);
+    sanitized.errorMessage = errorMessage.replace(CONTROL_CHARS_EXTENDED_PATTERN, "").substring(0, 512);
   }
 
   if (stackTrace !== undefined) {
     if (typeof stackTrace !== "string" || stackTrace.length > 16384) {
       return null;
     }
-    sanitized.stackTrace = stackTrace.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F]/g, "").substring(0, 4096);
+    sanitized.stackTrace = stackTrace.replace(CONTROL_CHARS_EXTENDED_PATTERN, "").substring(0, 4096);
   }
 
   return sanitized;

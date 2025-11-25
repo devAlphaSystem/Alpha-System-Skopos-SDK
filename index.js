@@ -13,12 +13,20 @@ const SESSIONS_COLLECTION = "sessions";
 const EVENTS_COLLECTION = "events";
 const ERRORS_COLLECTION = "js_errors";
 
+const WWW_PREFIX_PATTERN = /^www\./;
+const CONTROL_CHARS_PATTERN = /[\x00-\x1F\x7F-\x9F]/g;
+const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
 const DEFAULT_BATCH_INTERVAL_MS = 10000;
 const DEFAULT_MAX_BATCH_SIZE = 100;
 const DEFAULT_SESSION_TIMEOUT_MS = 1000 * 60 * 30;
 const DEFAULT_ERROR_BATCH_INTERVAL_MS = 1000 * 60 * 5;
 const SESSION_CACHE_CLEANUP_INTERVAL_MS = 1000 * 60 * 5;
 const AUTH_CHECK_INTERVAL_MS = 1000 * 60 * 10;
+const VISITOR_CACHE_TTL_MS = 1000 * 60 * 60;
+const VISITOR_CACHE_MAX_SIZE = 10000;
+const VISITOR_CACHE_CLEANUP_THRESHOLD = 1000;
+const SESSION_CACHE_MAX_SIZE = 50000;
 
 /**
  * The main Skopos SDK class for server-side event tracking.
@@ -59,6 +67,7 @@ class SkoposSDK {
     this.jsErrorQueue = new Map();
     this.eventTimer = null;
     this.cacheTimer = null;
+    this.visitorCacheTimer = null;
     this.jsErrorTimer = null;
     this.authCheckTimer = null;
     this.lastAuthCheck = 0;
@@ -76,6 +85,7 @@ class SkoposSDK {
       this._log("info", "Batching disabled. Events will be sent immediately.");
     }
     this.cacheTimer = setInterval(() => this._cleanSessionCache(), SESSION_CACHE_CLEANUP_INTERVAL_MS);
+    this.visitorCacheTimer = setInterval(() => this._cleanVisitorCache(), SESSION_CACHE_CLEANUP_INTERVAL_MS);
     this.jsErrorTimer = setInterval(() => this._flushJsErrors(), jsErrorBatchInterval);
 
     this.authCheckTimer = setInterval(() => this._proactiveAuthRefresh(), AUTH_CHECK_INTERVAL_MS);
@@ -213,7 +223,7 @@ class SkoposSDK {
     if (this.domain) {
       try {
         const payloadHostname = new URL(sanitizedPayload.url).hostname;
-        const siteDomain = this.domain.replace(/^www\./, "");
+        const siteDomain = this.domain.replace(WWW_PREFIX_PATTERN, "");
 
         if (payloadHostname !== siteDomain && !payloadHostname.endsWith(`.${siteDomain}`)) {
           this._log("warn", `trackApiEvent rejected. Payload URL hostname "${payloadHostname}" does not match site domain "${this.domain}".`);
@@ -368,16 +378,13 @@ class SkoposSDK {
 
     if (data.name !== undefined) {
       if (typeof data.name !== "string") return null;
-      sanitized.name = data.name
-        .replace(/[\x00-\x1F\x7F-\x9F]/g, "")
-        .trim()
-        .substring(0, 255);
+      sanitized.name = data.name.replace(CONTROL_CHARS_PATTERN, "").trim().substring(0, 255);
     }
 
     if (data.email !== undefined) {
       if (typeof data.email !== "string") return null;
       const email = data.email.trim().toLowerCase().substring(0, 255);
-      if (email.length > 0 && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      if (email.length > 0 && !EMAIL_PATTERN.test(email)) {
         return null;
       }
       sanitized.email = email;
@@ -385,10 +392,7 @@ class SkoposSDK {
 
     if (data.phone !== undefined) {
       if (typeof data.phone !== "string") return null;
-      sanitized.phone = data.phone
-        .replace(/[\x00-\x1F\x7F-\x9F]/g, "")
-        .trim()
-        .substring(0, 50);
+      sanitized.phone = data.phone.replace(CONTROL_CHARS_PATTERN, "").trim().substring(0, 50);
     }
 
     if (data.metadata !== undefined) {
@@ -417,10 +421,10 @@ class SkoposSDK {
    * @returns {Promise<{visitor: object, isNewVisitor: boolean}>}
    */
   async _getOrCreateVisitor(visitorId) {
-    const cachedVisitor = this.visitorCache.get(visitorId);
-    if (cachedVisitor) {
+    const cached = this.visitorCache.get(visitorId);
+    if (cached && Date.now() - cached.cachedAt < VISITOR_CACHE_TTL_MS) {
       this._log("debug", `Found cached visitor ${visitorId}`);
-      return { visitor: cachedVisitor, isNewVisitor: false };
+      return { visitor: cached.visitor, isNewVisitor: false };
     }
 
     if (this.visitorCreationLocks.has(visitorId)) {
@@ -435,7 +439,7 @@ class SkoposSDK {
         try {
           const visitor = await this.pb.collection(VISITORS_COLLECTION).getFirstListItem(`visitorId="${visitorId}"`);
           this._log("debug", `Found existing visitor ${visitorId}`);
-          this.visitorCache.set(visitorId, visitor);
+          this._setVisitorCache(visitorId, visitor);
           return { visitor, isNewVisitor: false };
         } catch (error) {
           if (error.status === 404) {
@@ -446,13 +450,13 @@ class SkoposSDK {
                 visitorId,
               });
               this._log("debug", `Created new visitor: ${visitor.id}`);
-              this.visitorCache.set(visitorId, visitor);
+              this._setVisitorCache(visitorId, visitor);
               return { visitor, isNewVisitor: true };
             } catch (createError) {
               if (createError.status === 400 || createError.data?.data?.visitorId) {
                 this._log("warn", "Race condition detected on visitor creation, re-fetching.");
                 const visitor = await this.pb.collection(VISITORS_COLLECTION).getFirstListItem(`visitorId="${visitorId}"`);
-                this.visitorCache.set(visitorId, visitor);
+                this._setVisitorCache(visitorId, visitor);
                 return { visitor, isNewVisitor: false };
               }
               throw createError;
@@ -461,9 +465,12 @@ class SkoposSDK {
           throw error;
         }
       } finally {
-        setTimeout(() => {
-          this.visitorCreationLocks.delete(visitorId);
-        }, 1000);
+        const cleanup = () => this.visitorCreationLocks.delete(visitorId);
+        if (typeof setImmediate !== "undefined") {
+          setImmediate(cleanup);
+        } else {
+          setTimeout(cleanup, 0);
+        }
       }
     })();
 
@@ -483,10 +490,13 @@ class SkoposSDK {
     this._log("info", "Shutdown initiated.");
     if (this.eventTimer) clearInterval(this.eventTimer);
     if (this.cacheTimer) clearInterval(this.cacheTimer);
+    if (this.visitorCacheTimer) clearInterval(this.visitorCacheTimer);
     if (this.jsErrorTimer) clearInterval(this.jsErrorTimer);
     if (this.authCheckTimer) clearInterval(this.authCheckTimer);
     this._log("debug", "All timers cleared.");
     this._cleanSessionCache();
+    this.visitorCache.clear();
+    this.visitorCreationLocks.clear();
     await this.pb.realtime.unsubscribe();
     this._log("debug", "Unsubscribed from real-time updates.");
     await this.flushEvents();
@@ -588,36 +598,43 @@ class SkoposSDK {
     const errorsToFlush = new Map(this.jsErrorQueue);
     this.jsErrorQueue.clear();
 
-    for (const [hash, errorData] of errorsToFlush.entries()) {
-      const filter = `errorHash="${hash}" && website="${this.websiteRecordId}"`;
-      try {
-        const existingError = await this.pb.collection(ERRORS_COLLECTION).getFirstListItem(filter);
-        await this.pb.collection(ERRORS_COLLECTION).update(existingError.id, {
-          "count+": errorData.count,
-          lastSeen: new Date().toISOString(),
-        });
-        this._log("debug", `Updated JS error: ${hash} for website ${this.websiteRecordId}`);
-      } catch (error) {
-        if (error.status === 404) {
-          try {
-            this._log("debug", `Creating new JS error: ${hash} for website ${this.websiteRecordId}`);
-            await this.pb.collection(ERRORS_COLLECTION).create({
-              website: this.websiteRecordId,
-              session: errorData.sessionId,
-              errorHash: hash,
-              errorMessage: errorData.errorMessage,
-              stackTrace: errorData.stackTrace,
-              url: errorData.url,
-              count: errorData.count,
-              lastSeen: new Date().toISOString(),
-            });
-          } catch (createError) {
-            this._log("error", "Failed to create new JS error record.", createError);
+    const errorEntries = [...errorsToFlush.entries()];
+    const BATCH_SIZE = 5;
+
+    for (let i = 0; i < errorEntries.length; i += BATCH_SIZE) {
+      const batch = errorEntries.slice(i, i + BATCH_SIZE);
+      const promises = batch.map(async ([hash, errorData]) => {
+        const filter = `errorHash="${hash}" && website="${this.websiteRecordId}"`;
+        try {
+          const existingError = await this.pb.collection(ERRORS_COLLECTION).getFirstListItem(filter);
+          await this.pb.collection(ERRORS_COLLECTION).update(existingError.id, {
+            "count+": errorData.count,
+            lastSeen: new Date().toISOString(),
+          });
+          this._log("debug", `Updated JS error: ${hash} for website ${this.websiteRecordId}`);
+        } catch (error) {
+          if (error.status === 404) {
+            try {
+              this._log("debug", `Creating new JS error: ${hash} for website ${this.websiteRecordId}`);
+              await this.pb.collection(ERRORS_COLLECTION).create({
+                website: this.websiteRecordId,
+                session: errorData.sessionId,
+                errorHash: hash,
+                errorMessage: errorData.errorMessage,
+                stackTrace: errorData.stackTrace,
+                url: errorData.url,
+                count: errorData.count,
+                lastSeen: new Date().toISOString(),
+              });
+            } catch (createError) {
+              this._log("error", "Failed to create new JS error record.", createError);
+            }
+          } else {
+            this._log("error", "Failed to find or update JS error record.", error);
           }
-        } else {
-          this._log("error", "Failed to find or update JS error record.", error);
         }
-      }
+      });
+      await Promise.allSettled(promises);
     }
   }
 
@@ -636,8 +653,59 @@ class SkoposSDK {
         cleanedCount++;
       }
     }
+
+    if (this.sessionCache.size > SESSION_CACHE_MAX_SIZE) {
+      const toDelete = this.sessionCache.size - SESSION_CACHE_MAX_SIZE + 1000;
+      let deleted = 0;
+      for (const key of this.sessionCache.keys()) {
+        if (deleted >= toDelete) break;
+        this.sessionCache.delete(key);
+        deleted++;
+        cleanedCount++;
+      }
+    }
+
     if (cleanedCount > 0) {
       this._log("info", `Cleaned ${cleanedCount} expired sessions from cache.`);
+    }
+  }
+
+  /**
+   * Sets a visitor in the cache with a timestamp, enforcing max size.
+   * Uses simple FIFO-like removal instead of expensive iteration to find oldest.
+   * @private
+   * @param {string} visitorId The visitor ID.
+   * @param {object} visitor The visitor record.
+   */
+  _setVisitorCache(visitorId, visitor) {
+    if (this.visitorCache.size >= VISITOR_CACHE_MAX_SIZE + VISITOR_CACHE_CLEANUP_THRESHOLD) {
+      const toDelete = this.visitorCache.size - VISITOR_CACHE_MAX_SIZE + 100;
+      let deleted = 0;
+      for (const key of this.visitorCache.keys()) {
+        if (deleted >= toDelete) break;
+        this.visitorCache.delete(key);
+        deleted++;
+      }
+    }
+    this.visitorCache.set(visitorId, { visitor, cachedAt: Date.now() });
+  }
+
+  /**
+   * Cleans up expired visitors from the visitor cache.
+   * @private
+   */
+  _cleanVisitorCache() {
+    this._log("debug", "Running visitor cache cleanup...");
+    const now = Date.now();
+    let cleanedCount = 0;
+    for (const [visitorId, cached] of this.visitorCache.entries()) {
+      if (now - cached.cachedAt > VISITOR_CACHE_TTL_MS) {
+        this.visitorCache.delete(visitorId);
+        cleanedCount++;
+      }
+    }
+    if (cleanedCount > 0) {
+      this._log("info", `Cleaned ${cleanedCount} expired visitors from cache.`);
     }
   }
 
@@ -858,8 +926,11 @@ class SkoposSDK {
     if (type !== "pageView" && name) {
       eventPayload.eventName = name;
     }
-    if (customData && Object.keys(customData).length > 0) {
-      eventPayload.eventData = customData;
+    if (customData) {
+      for (const _ in customData) {
+        eventPayload.eventData = customData;
+        break;
+      }
     }
 
     if (this.batchingEnabled) {
