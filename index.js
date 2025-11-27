@@ -5,7 +5,7 @@ const PocketBase = require("pocketbase/cjs");
 const geoip = require("geoip-lite");
 const ipaddr = require("ipaddr.js");
 const { createHash } = require("node:crypto");
-const { detectBot, parseUserAgent, extractRequestData, generateVisitorId, validateAndSanitizeApiPayload, getSanitizedDomain } = require("./modules/utils");
+const { detectBot, parseUserAgent, extractRequestData, generateVisitorId, validateAndSanitizeApiPayload, getSanitizedDomain, clearBotCache } = require("./modules/utils");
 const packageInfo = require("./package.json");
 
 const VISITORS_COLLECTION = "visitors";
@@ -23,10 +23,12 @@ const DEFAULT_SESSION_TIMEOUT_MS = 1000 * 60 * 30;
 const DEFAULT_ERROR_BATCH_INTERVAL_MS = 1000 * 60 * 5;
 const SESSION_CACHE_CLEANUP_INTERVAL_MS = 1000 * 60 * 5;
 const AUTH_CHECK_INTERVAL_MS = 1000 * 60 * 10;
-const VISITOR_CACHE_TTL_MS = 1000 * 60 * 60;
-const VISITOR_CACHE_MAX_SIZE = 10000;
-const VISITOR_CACHE_CLEANUP_THRESHOLD = 1000;
-const SESSION_CACHE_MAX_SIZE = 50000;
+const VISITOR_CACHE_TTL_MS = 1000 * 60 * 15;
+const VISITOR_CACHE_MAX_SIZE = 2000;
+const VISITOR_CACHE_CLEANUP_THRESHOLD = 200;
+const SESSION_CACHE_MAX_SIZE = 5000;
+const JS_ERROR_QUEUE_MAX_SIZE = 100;
+const EVENT_QUEUE_MAX_SIZE = 500;
 
 /**
  * The main Skopos SDK class for server-side event tracking.
@@ -424,7 +426,7 @@ class SkoposSDK {
     const cached = this.visitorCache.get(visitorId);
     if (cached && Date.now() - cached.cachedAt < VISITOR_CACHE_TTL_MS) {
       this._log("debug", `Found cached visitor ${visitorId}`);
-      return { visitor: cached.visitor, isNewVisitor: false };
+      return { visitor: { id: cached.id }, isNewVisitor: false };
     }
 
     if (this.visitorCreationLocks.has(visitorId)) {
@@ -488,19 +490,42 @@ class SkoposSDK {
    */
   async shutdown() {
     this._log("info", "Shutdown initiated.");
-    if (this.eventTimer) clearInterval(this.eventTimer);
-    if (this.cacheTimer) clearInterval(this.cacheTimer);
-    if (this.visitorCacheTimer) clearInterval(this.visitorCacheTimer);
-    if (this.jsErrorTimer) clearInterval(this.jsErrorTimer);
-    if (this.authCheckTimer) clearInterval(this.authCheckTimer);
+    if (this.eventTimer) {
+      clearInterval(this.eventTimer);
+      this.eventTimer = null;
+    }
+    if (this.cacheTimer) {
+      clearInterval(this.cacheTimer);
+      this.cacheTimer = null;
+    }
+    if (this.visitorCacheTimer) {
+      clearInterval(this.visitorCacheTimer);
+      this.visitorCacheTimer = null;
+    }
+    if (this.jsErrorTimer) {
+      clearInterval(this.jsErrorTimer);
+      this.jsErrorTimer = null;
+    }
+    if (this.authCheckTimer) {
+      clearInterval(this.authCheckTimer);
+      this.authCheckTimer = null;
+    }
     this._log("debug", "All timers cleared.");
-    this._cleanSessionCache();
+
+    this.sessionCache.clear();
     this.visitorCache.clear();
     this.visitorCreationLocks.clear();
+
     await this.pb.realtime.unsubscribe();
     this._log("debug", "Unsubscribed from real-time updates.");
     await this.flushEvents();
     await this._flushJsErrors();
+
+    this.eventQueue.length = 0;
+    this.jsErrorQueue.clear();
+    this.ipBlacklistSet.clear();
+    clearBotCache();
+
     this._log("info", "All queues have been flushed.");
     this._log("info", "Shutdown complete.");
   }
@@ -515,8 +540,7 @@ class SkoposSDK {
       return;
     }
 
-    const eventsToSend = [...this.eventQueue];
-    this.eventQueue = [];
+    const eventsToSend = this.eventQueue.splice(0, this.eventQueue.length);
     this._log("info", `Flushing ${eventsToSend.length} events.`);
 
     await this._ensureAdminAuth();
@@ -655,7 +679,7 @@ class SkoposSDK {
     }
 
     if (this.sessionCache.size > SESSION_CACHE_MAX_SIZE) {
-      const toDelete = this.sessionCache.size - SESSION_CACHE_MAX_SIZE + 1000;
+      const toDelete = this.sessionCache.size - SESSION_CACHE_MAX_SIZE + 100;
       let deleted = 0;
       for (const key of this.sessionCache.keys()) {
         if (deleted >= toDelete) break;
@@ -672,14 +696,14 @@ class SkoposSDK {
 
   /**
    * Sets a visitor in the cache with a timestamp, enforcing max size.
-   * Uses simple FIFO-like removal instead of expensive iteration to find oldest.
+   * Stores only essential data (record ID) instead of full visitor object to reduce memory.
    * @private
    * @param {string} visitorId The visitor ID.
    * @param {object} visitor The visitor record.
    */
   _setVisitorCache(visitorId, visitor) {
     if (this.visitorCache.size >= VISITOR_CACHE_MAX_SIZE + VISITOR_CACHE_CLEANUP_THRESHOLD) {
-      const toDelete = this.visitorCache.size - VISITOR_CACHE_MAX_SIZE + 100;
+      const toDelete = this.visitorCache.size - VISITOR_CACHE_MAX_SIZE + 50;
       let deleted = 0;
       for (const key of this.visitorCache.keys()) {
         if (deleted >= toDelete) break;
@@ -687,7 +711,7 @@ class SkoposSDK {
         deleted++;
       }
     }
-    this.visitorCache.set(visitorId, { visitor, cachedAt: Date.now() });
+    this.visitorCache.set(visitorId, { id: visitor.id, cachedAt: Date.now() });
   }
 
   /**
@@ -799,7 +823,6 @@ class SkoposSDK {
         await this.pb.collection(SESSIONS_COLLECTION).update(cachedSession.sessionId, {
           exitPath: path,
         });
-        cachedSession.lastVerified = now;
       } catch (err) {
         if (err.status === 404) {
           this._log("warn", `Session ${cachedSession.sessionId} not found in DB, removing from cache and will create a new one.`);
@@ -814,7 +837,6 @@ class SkoposSDK {
       if (sessionStillValid) {
         sessionId = cachedSession.sessionId;
         cachedSession.lastActivity = now;
-        cachedSession.lastPath = path;
         cachedSession.eventCount++;
 
         if (!cachedSession.isEngaged && (cachedSession.eventCount >= 2 || (customData?.duration && customData.duration > 10))) {
@@ -872,15 +894,8 @@ class SkoposSDK {
         this.sessionCache.set(visitorId, {
           sessionId,
           lastActivity: now,
-          lastVerified: now,
-          startTime: now,
           eventCount: 1,
-          lastPath: path,
           isEngaged: sessionIsEngaged,
-          isNewVisitor,
-          uaDetails,
-          country,
-          state,
         });
       } catch (e) {
         this._log("error", "Error creating session.", e);
@@ -904,10 +919,14 @@ class SkoposSDK {
       if (existingError) {
         existingError.count++;
       } else {
+        if (this.jsErrorQueue.size >= JS_ERROR_QUEUE_MAX_SIZE) {
+          this._log("warn", "JS error queue full, flushing before adding new error.");
+          await this._flushJsErrors();
+        }
         this.jsErrorQueue.set(errorHash, {
           sessionId: sessionId,
           errorMessage,
-          stackTrace,
+          stackTrace: stackTrace ? stackTrace.substring(0, 2048) : undefined,
           url: safeUrl,
           count: 1,
         });
@@ -936,6 +955,9 @@ class SkoposSDK {
       this._log("debug", `Event pushed to queue. Queue size: ${this.eventQueue.length}`);
       if (this.eventQueue.length >= this.maxBatchSize) {
         this._log("info", "Max batch size reached, flushing events.");
+        this.flushEvents();
+      } else if (this.eventQueue.length >= EVENT_QUEUE_MAX_SIZE) {
+        this._log("warn", "Event queue at max capacity, forcing flush to prevent memory leak.");
         this.flushEvents();
       }
     } else {

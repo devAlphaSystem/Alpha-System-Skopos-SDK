@@ -2,8 +2,8 @@ const { isbot } = require("isbot");
 const UAParser = require("ua-parser-js");
 const { createHash } = require("node:crypto");
 
-const BOT_CACHE_MAX_SIZE = 1000;
-const BOT_CACHE_TTL_MS = 1000 * 60 * 30;
+const BOT_CACHE_MAX_SIZE = 300;
+const BOT_CACHE_TTL_MS = 1000 * 60 * 15;
 const BOT_CACHE_CLEANUP_INTERVAL_MS = 1000 * 60 * 5;
 const botDetectionCache = new Map();
 let lastBotCacheCleanup = 0;
@@ -405,4 +405,5 @@ module.exports = {
   generateVisitorId,
   validateAndSanitizeApiPayload,
   getSanitizedDomain,
+  clearBotCache: () => botDetectionCache.clear(),
 };
