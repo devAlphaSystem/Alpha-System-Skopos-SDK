@@ -2,7 +2,7 @@ The **Skopos Node SDK** is the server-side ingestion layer for Alpha System's pr
 
 ### Capabilities
 - 🔐 PocketBase admin authentication with automatic token refresh.
-- 🧠 Smart visitor/session handling with geo-IP enrichment, bot detection, JS error hashing, and IP blacklist support.
+- 🧠 Smart visitor/session handling with bot detection, JS error hashing, and IP blacklist support.
 - ⚙️ Configurable batching, session timeout, short-session discarding, and localhost filtering.
 - 🔄 Real-time configuration refresh by subscribing to the `websites` collection.
 - 📦 First-class TypeScript declarations (`index.d.ts`).
@@ -208,8 +208,6 @@ import type { ApiEventPayload, SkoposSDKOptions } from "@alphasystem/skopos";
 ### FAQ
 
 **How do I rotate PocketBase admin credentials without downtime?**  Update the environment variables, restart your process, and the SDK will authenticate with the new credentials during `init`. If you rotate while the process runs, trigger `ensureAdminAuth` by revoking the old token so the SDK re-authenticates.
-
-**Can I disable geo lookups?**  Not currently, but you can fork `modules/utils.js` and stub `geoip-lite.lookup` to return `null` if you need to avoid country/state enrichment.
 
 **Is batching ordered?**  Yes. Events are flushed FIFO. If ordering matters across multiple server instances, send routing keys through your load balancer so related traffic lands in the same process.
 

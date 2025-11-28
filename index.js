@@ -2,7 +2,6 @@ const { EventSource } = require("eventsource");
 global.EventSource = EventSource;
 
 const PocketBase = require("pocketbase/cjs");
-const geoip = require("geoip-lite");
 const ipaddr = require("ipaddr.js");
 const { createHash } = require("node:crypto");
 const { detectBot, parseUserAgent, extractRequestData, generateVisitorId, validateAndSanitizeApiPayload, getSanitizedDomain, clearBotCache } = require("./modules/utils");
@@ -794,18 +793,8 @@ class SkoposSDK {
 
     await this._ensureAdminAuth();
 
-    let country = "Unknown";
-    let state = "Unknown";
-    if (ip) {
-      const geo = geoip.lookup(ip);
-      if (geo?.country) {
-        country = geo.country;
-      }
-      if (geo?.region) {
-        state = geo.region;
-      }
-    }
-    this._log("debug", `GeoIP lookup for ${ip}: ${country}, ${state}`);
+    const country = "Unknown";
+    const state = "Unknown";
 
     const visitorId = generateVisitorId(siteId, ip, userAgent);
     const now = Date.now();
