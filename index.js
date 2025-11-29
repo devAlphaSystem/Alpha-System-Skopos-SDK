@@ -633,21 +633,6 @@ class SkoposSDK {
     }
 
     try {
-      let addr = ipaddr.parse(ip);
-      if (addr.isIPv4MappedAddress()) {
-        addr = addr.toIPv4Address();
-      }
-      const range = addr.range();
-      if (range === "loopback" || range === "private" || range === "linkLocal") {
-        this._log("debug", `Skipping geolocation for ${range} IP: ${ip}`);
-        return { country: "Unknown", state: "Unknown" };
-      }
-    } catch (e) {
-      this._log("warn", `Could not parse IP for geolocation check: ${ip}`);
-      return { country: "Unknown", state: "Unknown" };
-    }
-
-    try {
       this._log("debug", `Fetching geolocation for IP: ${ip}`);
       const data = await this.chapybara.ip.getIntelligence(ip);
       const country = data.location?.country?.name || "Unknown";
