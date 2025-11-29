@@ -2,6 +2,7 @@ const { EventSource } = require("eventsource");
 global.EventSource = EventSource;
 
 const PocketBase = require("pocketbase/cjs");
+const { ChapybaraClient } = require("chapybara");
 const ipaddr = require("ipaddr.js");
 const { createHash } = require("node:crypto");
 const { detectBot, parseUserAgent, extractRequestData, generateVisitorId, validateAndSanitizeApiPayload, getSanitizedDomain, clearBotCache } = require("./modules/utils");
@@ -72,6 +73,20 @@ class SkoposSDK {
     this.jsErrorTimer = null;
     this.authCheckTimer = null;
     this.lastAuthCheck = 0;
+
+    this.chapybara = null;
+    if (options.chapybaraApiKey) {
+      this.chapybara = new ChapybaraClient({
+        apiKey: options.chapybaraApiKey,
+        cacheOptions: {
+          max: 1000,
+          ttl: 1000 * 60 * 5,
+        },
+      });
+      this._log("info", "Chapybara client initialized for IP geolocation.");
+    } else {
+      this._log("warn", "No Chapybara API key provided. Country and state will be 'Unknown'.");
+    }
 
     this.batchingEnabled = options.batch ?? false;
     this.batchInterval = options.batchInterval ?? DEFAULT_BATCH_INTERVAL_MS;
@@ -606,6 +621,46 @@ class SkoposSDK {
   }
 
   /**
+   * Gets geolocation data (country and state) for an IP address using Chapybara.
+   * Falls back to "Unknown" if Chapybara is not configured or if the lookup fails.
+   * @private
+   * @param {string | undefined} ip The IP address to look up.
+   * @returns {Promise<{country: string, state: string}>}
+   */
+  async _getGeoLocation(ip) {
+    if (!ip || !this.chapybara) {
+      return { country: "Unknown", state: "Unknown" };
+    }
+
+    try {
+      let addr = ipaddr.parse(ip);
+      if (addr.isIPv4MappedAddress()) {
+        addr = addr.toIPv4Address();
+      }
+      const range = addr.range();
+      if (range === "loopback" || range === "private" || range === "linkLocal") {
+        this._log("debug", `Skipping geolocation for ${range} IP: ${ip}`);
+        return { country: "Unknown", state: "Unknown" };
+      }
+    } catch (e) {
+      this._log("warn", `Could not parse IP for geolocation check: ${ip}`);
+      return { country: "Unknown", state: "Unknown" };
+    }
+
+    try {
+      this._log("debug", `Fetching geolocation for IP: ${ip}`);
+      const data = await this.chapybara.ip.getIntelligence(ip);
+      const country = data.location?.country?.name || "Unknown";
+      const state = data.location?.region?.name || "Unknown";
+      this._log("debug", `Geolocation result: ${country}, ${state}`);
+      return { country, state };
+    } catch (error) {
+      this._log("warn", `Failed to get geolocation for IP ${ip}:`, error.message);
+      return { country: "Unknown", state: "Unknown" };
+    }
+  }
+
+  /**
    * Flushes the in-memory JS error queue to the PocketBase js_errors collection.
    * Merges with existing records or creates new ones as needed.
    * @private
@@ -793,8 +848,7 @@ class SkoposSDK {
 
     await this._ensureAdminAuth();
 
-    const country = "Unknown";
-    const state = "Unknown";
+    const { country, state } = await this._getGeoLocation(ip);
 
     const visitorId = generateVisitorId(siteId, ip, userAgent);
     const now = Date.now();

@@ -27,6 +27,15 @@ export interface SkoposSDKOptions {
   adminPassword?: string;
 
   /**
+   * API key for Chapybara IP geolocation service.
+   * When provided, the SDK will use Chapybara to determine visitor country and state.
+   * Get your API key from the Chapybara dashboard.
+   * Note: The key must be set manually here since dashboard keys are encrypted.
+   * @example "ck_your_api_key_here"
+   */
+  chapybaraApiKey?: string;
+
+  /**
    * Set to `true` to enable event batching for better performance.
    * @default false
    */

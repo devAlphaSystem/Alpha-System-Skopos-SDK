@@ -39,6 +39,7 @@ const skopos = await SkoposSDK.init({
 	siteId: process.env.SKOPOS_SITE_ID!,
 	adminEmail: process.env.PB_ADMIN_EMAIL,
 	adminPassword: process.env.PB_ADMIN_PASSWORD,
+	chapybaraApiKey: process.env.CHAPYBARA_API_KEY,
 	batch: true,
 	batchInterval: 5000,
 	debug: process.env.NODE_ENV !== "production",
@@ -100,6 +101,7 @@ const SkoposSDK = require("@alphasystem/skopos");
 | `pocketbaseUrl` | `string` | — | Base URL of your PocketBase instance (must be reachable from the server). |
 | `siteId` | `string` | — | Website tracking ID. Must match `websites.trackingId`. |
 | `adminEmail` / `adminPassword` | `string` | `undefined` | Admin credentials that let the SDK create visitors, sessions, events, and errors even if collection rules are restrictive. |
+| `chapybaraApiKey` | `string` | `undefined` | API key for Chapybara IP geolocation. Enables country/state detection for visitors. Must be set manually (dashboard keys are encrypted). Get your key from the Chapybara dashboard. |
 | `batch` | `boolean` | `false` | Enables in-memory event batching. |
 | `batchInterval` | `number` | `10000` | Flush interval in ms when batching. |
 | `maxBatchSize` | `number` | `100` | Flush immediately once the queue hits this size. |
@@ -163,6 +165,18 @@ The SDK automatically rejects malformed data, non-HTTP(S) URLs, oversized payloa
 - Visitors are anonymized via SHA-256 of `siteId + ip + user-agent`.
 - Sessions expire after `sessionTimeoutMs` of inactivity. A cached session will renew as long as the SDK can still write to PocketBase.
 - Engagement is tracked when either multiple events exist or a `duration` custom field exceeds 10 seconds. This drives the engagement rate surfaced in the dashboard.
+
+### IP Geolocation
+The SDK uses [Chapybara](https://chapyapi.com/) for IP-based geolocation (country and state/region detection). This replaces the previous `geoip-lite` package which consumed over 120MB of RAM per project.
+
+To enable geolocation:
+1. Get a Chapybara API key from the Chapybara dashboard
+2. Pass the key via `chapybaraApiKey` option during SDK initialization
+3. The key must be set manually in your code or environment variables (dashboard keys are encrypted and cannot be used directly)
+
+Chapybara offers 50,000 free requests daily. IP lookups are cached for 5 minutes to minimize API calls.
+
+If no API key is provided, country and state will be set to "Unknown".
 
 ### Error Tracking
 `trackApiEvent` accepts a `type: "jsError"` payload. The SDK hashes `errorMessage + stack trace` so repeated crashes are merged. Batched errors persist to the `js_errors` collection during `_flushJsErrors()`.
