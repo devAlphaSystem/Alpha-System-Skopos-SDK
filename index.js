@@ -434,13 +434,16 @@ class SkoposSDK {
    * Uses an in-memory cache to reduce database lookups for repeat visitors.
    * @private
    * @param {string} visitorId The hashed visitor ID.
+   * @param {boolean} [skipCache=false] If true, bypasses the cache and fetches directly from the database.
    * @returns {Promise<{visitor: object, isNewVisitor: boolean}>}
    */
-  async _getOrCreateVisitor(visitorId) {
-    const cached = this.visitorCache.get(visitorId);
-    if (cached && Date.now() - cached.cachedAt < VISITOR_CACHE_TTL_MS) {
-      this._log("debug", `Found cached visitor ${visitorId}`);
-      return { visitor: { id: cached.id }, isNewVisitor: false };
+  async _getOrCreateVisitor(visitorId, skipCache = false) {
+    if (!skipCache) {
+      const cached = this.visitorCache.get(visitorId);
+      if (cached && Date.now() - cached.cachedAt < VISITOR_CACHE_TTL_MS) {
+        this._log("debug", `Found cached visitor ${visitorId}`);
+        return { visitor: { id: cached.id }, isNewVisitor: false };
+      }
     }
 
     if (this.visitorCreationLocks.has(visitorId)) {
@@ -881,8 +884,21 @@ class SkoposSDK {
       isNewSession = true;
       this._log("info", `No active session found for visitor ${visitorId}. Creating a new one.`);
 
-      const { visitor, isNewVisitor: newVisitor } = await this._getOrCreateVisitor(visitorId);
-      isNewVisitor = newVisitor;
+      let visitor;
+      let visitorResult;
+      try {
+        visitorResult = await this._getOrCreateVisitor(visitorId);
+        visitor = visitorResult.visitor;
+        isNewVisitor = visitorResult.isNewVisitor;
+      } catch (visitorError) {
+        this._log("error", "Failed to get or create visitor.", visitorError);
+        return;
+      }
+
+      if (!visitor || !visitor.id) {
+        this._log("error", "Invalid visitor object returned, cannot create session.");
+        return;
+      }
 
       this._log("info", `Visitor is a ${isNewVisitor ? "new visitor" : "returning visitor"}.`);
 
@@ -926,8 +942,41 @@ class SkoposSDK {
           isEngaged: sessionIsEngaged,
         });
       } catch (e) {
-        this._log("error", "Error creating session.", e);
-        return;
+        if (e.status === 400 && e.data?.data?.visitor) {
+          this._log("warn", "Session creation failed due to invalid visitor reference. Clearing cache and retrying...");
+          this.visitorCache.delete(visitorId);
+
+          try {
+            const retryResult = await this._getOrCreateVisitor(visitorId, true);
+            const retryVisitor = retryResult.visitor;
+            isNewVisitor = retryResult.isNewVisitor;
+
+            if (!retryVisitor || !retryVisitor.id) {
+              this._log("error", "Retry failed: Invalid visitor object returned.");
+              return;
+            }
+
+            sessionData.visitor = retryVisitor.id;
+            sessionData.isNewVisitor = isNewVisitor;
+
+            const newSession = await this.pb.collection(SESSIONS_COLLECTION).create(sessionData);
+            sessionId = newSession.id;
+            this._log("info", `Session created on retry: ${sessionId} for visitor ${retryVisitor.id}`);
+
+            this.sessionCache.set(visitorId, {
+              sessionId,
+              lastActivity: now,
+              eventCount: 1,
+              isEngaged: sessionIsEngaged,
+            });
+          } catch (retryError) {
+            this._log("error", "Error creating session on retry.", retryError);
+            return;
+          }
+        } else {
+          this._log("error", "Error creating session.", e);
+          return;
+        }
       }
     }
 
